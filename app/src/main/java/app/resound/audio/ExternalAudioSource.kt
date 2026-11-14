@@ -41,6 +41,7 @@ internal class RoutedRecording(
     private val onOpenChanged: (Boolean) -> Unit,
 ) {
     private val bluetooth = kind == InputKind.BluetoothCall || kind == InputKind.BluetoothLe
+    private val proactiveYield = MicHandoff.shouldRelease(kind, true)
     // 时间跟帧一起跨 flowOn 通道；只在消费线程暴露当前帧，不能让 IO 线程提前覆盖。
     private data class TimedEvent(val event: AudioEvent, val epochMillis: Long? = null)
     var frameEpochMillis: Long? = null
@@ -55,16 +56,20 @@ internal class RoutedRecording(
             bluetooth && Build.VERSION.SDK_INT >= 31 && !permitted(Manifest.permission.BLUETOOTH_CONNECT))
             throw AudioSourceException(AudioSourceException.Reason.NoPermission)
         val manager = context.getSystemService(AudioManager::class.java)
-        // 卡 112：蓝牙要占通话模式，占着时别的应用（如语音输入法）拿不到话筒。
-        // 发现别人要录音就整轮让出（释放录音和通话路由），等别人用完再接回来；手机麦克风由系统自动礼让，不需要这样做。
+        // 手机也主动关闭 AudioRecord，让需要独占麦克风的输入法有机会获得设备。
+        // 只观察系统录音配置，不读取输入内容，不添加无障碍或其他权限。
         while (true) {
-            if (bluetooth) while (CaptureHealth.othersRecording(manager)) { report(MicYield.OTHER_APP); delay(1_000) }
+            if (proactiveYield && (reported != null || CaptureHealth.othersRecording(manager))) {
+                report(MicYield.OTHER_APP)
+                MicHandoff.awaitRelease({ CaptureHealth.othersRecording(manager) }) { delay(it) }
+            }
             val yielded = recordOnce(manager)
             if (!yielded) return@flow
+            report(MicYield.OTHER_APP)
         }
     }.flowOn(Dispatchers.IO)
 
-    /** 录一轮；蓝牙为别的应用让出话筒时返回 true（外层等别人用完再来），其余结束方式照旧抛异常或返回 false。 */
+    /** 录一轮；手机或蓝牙为别的应用让出话筒时返回 true（外层等别人用完再来），其余结束方式照旧抛异常或返回 false。 */
     private suspend fun FlowCollector<TimedEvent>.recordOnce(manager: AudioManager): Boolean {
         var record: AudioRecord? = null
         var ownsCommunication = false
@@ -104,14 +109,19 @@ internal class RoutedRecording(
             val zeros = CaptureHealth.ZeroWatch()
             val lastReturnAt = java.util.concurrent.atomic.AtomicLong(SystemClock.elapsedRealtime())
             val stalled = java.util.concurrent.atomic.AtomicBoolean(false)
-            var yielded = false
+            val yielded = MutableStateFlow(false)
             coroutineScope {
                 // 阻塞读在设备不出声时会一直等；看门狗超时没返回就停掉录音让它返回。取消时同样靠它解开阻塞。
                 // 卡 112：让麦期间也要有上限，否则读卡死时永远出不来（原来让麦期间不计时）。
                 val watchdog = launch {
                     try {
                         while (true) {
-                            delay(500)
+                            if (proactiveYield) signals.handoff.awaitOrTimeout() else delay(250)
+                            if (proactiveYield && (signals.handoff.requested || CaptureHealth.othersRecording(manager))) {
+                                yielded.value = true
+                                runCatching { opened.stop() } // 解开 READ_BLOCKING，再由 finally release
+                                break
+                            }
                             val limit = if (yieldReason() != null) CaptureHealth.STALL_YIELDING_MS else CaptureHealth.STALL_MS
                             if (SystemClock.elapsedRealtime() - lastReturnAt.get() > limit) { stalled.set(true); runCatching { opened.stop() }; break }
                         }
@@ -120,7 +130,7 @@ internal class RoutedRecording(
                 try {
                     while (currentCoroutineContext().isActive) {
                         signals.refresh()
-                        if (bluetooth && signals.othersRecording) { yielded = true; break }
+                        if (MicHandoff.shouldRelease(kind, signals.handoff.requested)) { yielded.value = true; break }
                         val wait = yieldReason()
                         val wasBusy = reported != null
                         report(wait)
@@ -131,6 +141,7 @@ internal class RoutedRecording(
                         } else if (wasBusy) routeDeadline = SystemClock.elapsedRealtime() + 2_000
                         val count = CaptureReadPolicy.samples(opened.sampleRate, opened.channelCount, readDurationMillis())
                         val n = opened.read(buffer, 0, count, AudioRecord.READ_BLOCKING)
+                        if (yielded.value) break
                         if (n > 0 && wait == null) clock.readCompleted(n)
                         lastReturnAt.set(SystemClock.elapsedRealtime())
                         if (stalled.get()) throw AudioSourceException(AudioSourceException.Reason.Disconnected, "输入设备没有送来声音")
@@ -162,7 +173,7 @@ internal class RoutedRecording(
                     }
                 } finally { watchdog.cancel() }
             }
-            return yielded
+            return yielded.value
         } catch (e: SecurityException) {
             throw AudioSourceException(AudioSourceException.Reason.NoPermission, e.message)
         } catch (e: IllegalArgumentException) {
@@ -234,14 +245,16 @@ private class MicSignals(private val manager: AudioManager) : AutoCloseable {
     /** 卡 112：有别的应用在录音（不含本应用自己的录音和系统唤醒词） */
     @Volatile var othersRecording = false
         private set
+    val handoff = MicHandoff.Signal()
     private var record: AudioRecord? = null
     private var checkedAt = 0L
     private val handler = Handler(Looper.getMainLooper())
     private val recordings = object : AudioManager.AudioRecordingCallback() {
         override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
-            val id = record?.audioSessionId ?: return
+            val id = record?.audioSessionId
             configs.firstOrNull { it.clientAudioSessionId == id }?.let { silenced = it.isClientSilenced }
             othersRecording = CaptureHealth.others(configs)
+            handoff.observe(othersRecording)
         }
     }
     private val routing = AudioRouting.OnRoutingChangedListener { routed = it.routedDevice }
@@ -260,6 +273,7 @@ private class MicSignals(private val manager: AudioManager) : AutoCloseable {
         opened.activeRecordingConfiguration?.let { silenced = it.isClientSilenced }
         routed = opened.routedDevice
         othersRecording = CaptureHealth.othersRecording(manager)
+        handoff.observe(othersRecording)
     }
     override fun close() {
         manager.unregisterAudioRecordingCallback(recordings)
