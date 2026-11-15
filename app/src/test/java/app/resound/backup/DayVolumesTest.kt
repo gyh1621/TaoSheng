@@ -124,6 +124,25 @@ class DayVolumesTest {
         } finally { room.close() }
         writes.clear(); sync(); assertFalse(writes.any { it.startsWith("features/") })
     }
+    @Test fun restoresWholeTranscriptWithOriginalRecordingAcrossDays() = runBlocking {
+        val recorded = at("2026-10-21")
+        db.capture().segment(app.resound.data.SegmentEntity(91, recorded, recorded + 1000, "mic", "/old/audio.ogg", 100, "Done"))
+        val whole = db.wholeTranscripts()
+        whole.enqueue(91, now)
+        val generation = whole.get(91)!!.generation
+        assertEquals(1, whole.claim(91, generation))
+        assertEquals(1, whole.complete(91, generation, "整体版保留完整上下文", now))
+        sync()
+        val room = CaptureDatabase.open(context, File(restore(), BackupArchive.DATABASE).path)
+        try {
+            val restored = room.wholeTranscripts().get(91)!!
+            assertEquals("整体版保留完整上下文", restored.text)
+            assertEquals("Done", restored.status)
+            assertEquals(generation, restored.generation)
+            assertNotNull(room.transcribe().findSegment(91))
+            room.testSql.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
+        } finally { room.close() }
+    }
     @Test fun oldMissingColumnDefaultsAndFutureVersionRefused() {
         val state = File(root, "state.jsonl").apply { writeText("") }
         val rows = File(root, "old.jsonl").apply { writeText("""{"table":"segments","values":{"id":1,"startAt":0,"endAt":1,"sourceId":"mic","path":"old","sizeBytes":0,"status":"Done"}}

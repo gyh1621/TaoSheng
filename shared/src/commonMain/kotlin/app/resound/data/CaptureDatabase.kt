@@ -52,7 +52,7 @@ interface CaptureDao {
     fun batteries(start: Long, end: Long): Flow<List<BatteryEntity>>
 }
 
-@Database(entities = [app.resound.topic.TopicRow::class, app.resound.topic.TopicSpanRow::class, app.resound.topic.TopicMarkRow::class, app.resound.devices.DeviceTransfer::class, app.resound.importer.ImportFingerprint::class, app.resound.importer.FolderObservation::class, PrivacyFileCleanup::class, app.resound.things.ThingRow::class, app.resound.things.ThingRecordRow::class, app.resound.things.ThingWatchState::class, app.resound.importer.ImportRecordRow::class, app.resound.redo.RedoSnapshotRow::class, SegmentEntity::class, EventEntity::class, HeartbeatEntity::class, BatteryEntity::class,
+@Database(entities = [WholeTranscript::class, app.resound.topic.TopicRow::class, app.resound.topic.TopicSpanRow::class, app.resound.topic.TopicMarkRow::class, app.resound.devices.DeviceTransfer::class, app.resound.importer.ImportFingerprint::class, app.resound.importer.FolderObservation::class, PrivacyFileCleanup::class, app.resound.things.ThingRow::class, app.resound.things.ThingRecordRow::class, app.resound.things.ThingWatchState::class, app.resound.importer.ImportRecordRow::class, app.resound.redo.RedoSnapshotRow::class, SegmentEntity::class, EventEntity::class, HeartbeatEntity::class, BatteryEntity::class,
     TranscriptLineEntity::class, AsrUsageEntity::class, AsrAttemptEntity::class,
     MemoryEventEntity::class, MemoryItemEntity::class, LlmUsageV2Entity::class, AppPowerEntity::class,
     VoiceprintSampleEntity::class, VoiceprintExclusionEntity::class, VoiceprintPersonEntity::class,
@@ -76,6 +76,7 @@ abstract class CaptureDatabase : RoomDatabase() {
     abstract fun capture(): CaptureDao
     abstract fun voiceInput(): VoiceInputDao
     abstract fun transcribe(): TranscribeDao
+    abstract fun wholeTranscripts(): WholeTranscriptDao
     abstract fun memory(): MemoryDao
     abstract fun voiceprint(): VoiceprintDao
     abstract fun ask(): AskDao
@@ -85,7 +86,7 @@ abstract class CaptureDatabase : RoomDatabase() {
     abstract fun places(): app.resound.location.PlaceDao
     companion object {
         /** 当前数据库版本；加迁移时同步改这里 */
-        const val VERSION = 34
+        const val VERSION = 35
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: androidx.sqlite.SQLiteConnection) {
@@ -337,7 +338,12 @@ abstract class CaptureDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_transcript_lines_startAt` ON `transcript_lines` (`startAt`)")
             }
         }
-        val MIGRATIONS get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32, MIGRATION_32_33, MIGRATION_33_34)
+        val MIGRATION_34_35 = object : Migration(34, 35) {
+            override fun migrate(db: androidx.sqlite.SQLiteConnection) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS whole_transcripts (segmentId INTEGER NOT NULL PRIMARY KEY, generation INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL, updatedAt INTEGER NOT NULL, FOREIGN KEY(segmentId) REFERENCES segments(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+            }
+        }
+        val MIGRATIONS get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32, MIGRATION_32_33, MIGRATION_33_34, MIGRATION_34_35)
     }
 }
 

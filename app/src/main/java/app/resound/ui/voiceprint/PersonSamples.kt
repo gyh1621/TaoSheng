@@ -103,8 +103,10 @@ private fun SampleRow(sample: VoiceprintSample, person: VoiceprintPerson, confir
         PlayButton(sample, personColor(person), onPlay)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, style = RsType.body, color = if (sample.state == SampleState.Failed) c.textSecondary else c.text,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            app.resound.ui.transcript.LineTranscriptVersions(sample.lineId) {
+                Text(title, style = RsType.body, color = if (sample.state == SampleState.Failed) c.textSecondary else c.text,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
             Spacer(Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 tag?.let { Tag(it, if (sample.state == SampleState.Failed) c.warning else c.textSecondary); Spacer(Modifier.width(6.dp)) }
@@ -157,7 +159,9 @@ private fun LineSection(repo: VoiceprintRepository, person: VoiceprintPerson, li
             (if (expanded) lines else lines.take(FOLDED)).forEach { line ->
                 key(line.lineId) {
                     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.fill).padding(horizontal = 14.dp, vertical = 10.dp)) {
-                        Text("“${line.text}”", style = RsType.body, color = c.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        app.resound.ui.transcript.LineTranscriptVersions(line.lineId) {
+                            Text("“${line.text}”", style = RsType.body, color = c.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        }
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(listOfNotNull(stamp(line.startAt), if (line.manual) "手动指定" else "自动认出").joinToString(" · "),

@@ -32,7 +32,7 @@ internal fun List<Long>.sqlIds() = if (isEmpty()) "NULL" else distinct().joinToS
 /** 只快照本任务涉及的行；JSON 保留列类型和 NULL，不复制整个数据库，也不回滚计费用量。 */
 internal class RedoSnapshot(private val db: CaptureDatabase) {
     suspend fun rows(table: String, where: String): JSONArray = JSONArray().apply {
-        db.readSql("SELECT * FROM $table WHERE $where ORDER BY id") { c ->
+        db.readSql("SELECT * FROM $table WHERE $where ORDER BY ${if (table == "whole_transcripts") "segmentId" else "id"}") { c ->
             while (c.step()) put(JSONObject().apply {
                 c.columnNames.forEachIndexed { i, name -> put(name, when (c.getColumnType(i)) {
                     androidx.sqlite.SQLITE_DATA_NULL -> JSONObject.NULL
@@ -46,7 +46,7 @@ internal class RedoSnapshot(private val db: CaptureDatabase) {
     suspend fun capture(selectors: Map<String, String>) = JSONObject().apply { selectors.forEach { (t, w) -> put(t, rows(t, w)) } }
     suspend fun restore(data: JSONObject) {
         // UPDATE segments 避免 REPLACE 级联删除原话；其余表由调用者先按 ID 清理。
-        listOf("segments", "memory_events", "transcript_lines", "memory_items", "skill_cards").filter { data.has(it) }.forEach { table ->
+        listOf("segments", "memory_events", "transcript_lines", "memory_items", "skill_cards", "whole_transcripts").filter { data.has(it) }.forEach { table ->
             val rows = data.getJSONArray(table)
             for (i in 0 until rows.length()) {
                 val row = rows.getJSONObject(i)
@@ -60,15 +60,17 @@ internal class RedoSnapshot(private val db: CaptureDatabase) {
     }
     suspend fun delete(data: JSONObject) {
         // 子表先删，避免 FK 级联影响保留项。
-        listOf("memory_items", "transcript_lines", "skill_cards", "memory_events").forEach { table ->
+        listOf("memory_items", "transcript_lines", "skill_cards", "memory_events", "whole_transcripts").forEach { table ->
             val rows = data.optJSONArray(table) ?: return@forEach
-            val ids = (0 until rows.length()).map { rows.getJSONObject(it).getLong("id") }
-            db.writeSql("DELETE FROM $table WHERE id IN (${ids.sqlIds()})")
+            val key = if (table == "whole_transcripts") "segmentId" else "id"
+            val ids = (0 until rows.length()).map { rows.getJSONObject(it).getLong(key) }
+            db.writeSql("DELETE FROM $table WHERE $key IN (${ids.sqlIds()})")
         }
     }
     suspend fun unchanged(data: JSONObject, voiceprint: Boolean = false): Boolean = data.keys().asSequence().all { table ->
         val old = data.getJSONArray(table)
-        val ids = (0 until old.length()).map { old.getJSONObject(it).getLong("id") }
+        val key = if (table == "whole_transcripts") "segmentId" else "id"
+        val ids = (0 until old.length()).map { old.getJSONObject(it).getLong(key) }
         fun comparable(value: JSONArray): String {
             val copy = JSONArray(value.toString())
             for (i in 0 until copy.length()) {
@@ -79,6 +81,6 @@ internal class RedoSnapshot(private val db: CaptureDatabase) {
             }
             return copy.toString()
         }
-        comparable(rows(table, "id IN (${ids.sqlIds()})")) == comparable(old)
+        comparable(rows(table, "$key IN (${ids.sqlIds()})")) == comparable(old)
     }
 }

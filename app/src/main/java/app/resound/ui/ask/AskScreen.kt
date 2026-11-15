@@ -257,8 +257,10 @@ private fun SourceRow(n: Int, s: AskSource, open: Boolean, onClick: () -> Unit) 
         }
         AnimatedVisibility(open) {
             Column(Modifier.padding(start = 26.dp, top = 6.dp)) {
-                Text("“${s.quote}”", style = RsType.subhead, color = c.text,
-                    modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(c.fill).padding(10.dp))
+                app.resound.ui.transcript.LineTranscriptVersions(if (s.kind == "line") s.id else null) {
+                    Text("“${s.quote}”", style = RsType.subhead, color = c.text,
+                        modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(c.fill).padding(10.dp))
+                }
                 if (current != null) Text("查看这件事 ›", style = RsType.subhead.copy(fontWeight = FontWeight.Medium), color = c.accent,
                     modifier = Modifier.padding(top = 6.dp).springClick { detail = true })
             }

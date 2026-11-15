@@ -117,6 +117,7 @@ class ResoundApp : Application() {
         AppGraph.situation = app.resound.context.LocalSituationLookup.create(database, AppGraph.location, scope, AppGraph.platform.zone, AppGraph.platform.dispatchers.io)
         val originalAudio = LocalOriginalAudio(database.transcribe(), getSharedPreferences("transcribe", MODE_PRIVATE), scope,
             guard = { block -> voiceprintRepository.withAudioCleanup(block) },
+            extraPending = { database.wholeTranscripts().pendingIds().toSet() },
             playback = PlaybackCaptureHold(scope, CaptureService::playbackHold))
         AppGraph.originalAudio = originalAudio
         voiceprintRepository.cleanupOriginalAudio = originalAudio::cleanup
@@ -143,8 +144,16 @@ class ResoundApp : Application() {
                     (!settings.wifiOnly.value || network.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
             }
         }
+        AppGraph.wholeTranscripts = database.wholeTranscripts()
+        val wholeRunner = WholeTranscribeRunner(database.wholeTranscripts(), database.transcribe(),
+            CustomAsrProvider(settings, hotwords::merged), { settings.credential(TranscribeSource.Custom) },
+            { settings.ready(TranscribeSource.Custom) && sourceNetwork(TranscribeSource.Custom) }, settings::identity,
+            warning = { transcripts.updateState(System.currentTimeMillis(), it) })
         transcribeRunner = TranscribeRunner(database.transcribe(), ConfiguredAsrProvider(this, settings, hotwords::merged),
             settings::credential, transcripts::updateState, deferAudioCleanup = true,
+            wholePrepare = { segment, source -> if (source == TranscribeSource.Custom) database.wholeTranscripts().enqueue(segment.id, System.currentTimeMillis(), segment.redoPending) },
+            wholeRun = wholeRunner::runPending,
+            wholePending = { database.wholeTranscripts().pendingIds().toSet() },
             sourceReady = settings::ready, sourceKey = settings::credential, sourceNetwork = sourceNetwork, recordSpeed = asrChooser::record,
             recordTiming = { PipelineTimes.recordSegment(this, it) },
             defaultSource = { settings.source.value }, separateSpeakers = asrSpeed::effectiveSeparateSpeakers, topicTraining = database.topics()::trainingAt,
@@ -184,7 +193,7 @@ class ResoundApp : Application() {
         val (things, thingExtraction) = app.resound.things.createThings(this, database, scope, digestSettings) { AppGraph.prompts.text("things") }
         AppGraph.things = things
         val skillScheduler = app.resound.skills.SkillScheduler(this)
-        digestRunner = DigestRunner(this, database.memory(), llm, digestSettings, { AppGraph.prompts.text("digest") }, situation = AppGraph.situation, thingExtraction = thingExtraction, networkAllowed = {
+        digestRunner = DigestRunner(this, database.memory(), llm, digestSettings, { AppGraph.prompts.text("digest") }, wholeTranscripts = database.wholeTranscripts()::getMany, situation = AppGraph.situation, thingExtraction = thingExtraction, networkAllowed = {
             val connectivity = getSystemService(ConnectivityManager::class.java)
             connectivity.getNetworkCapabilities(connectivity.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
         }, unseparated = database.transcribe()::unseparated, isMedia = database.envSound()::media, voiceprintReady = voiceprintRepository::isReady, hotwords = hotwords::merged, afterDigest = { manual -> app.resound.importer.ImportTodoMerge.all(database); skillScheduler.afterDigest(manual) })

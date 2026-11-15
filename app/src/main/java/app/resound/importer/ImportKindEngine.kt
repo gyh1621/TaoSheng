@@ -43,17 +43,29 @@ internal class ImportKindEngine(
                 row = dao.get(row.id) ?: continue
                 if (!row.speakersReady || !row.summaryRequested) continue
                 val lines = dao.lines(row.id)
+                val wholeRows = db.wholeTranscripts().getMany(segments.map { it.id })
+                if (wholeRows.any { app.resound.digest.WholeTranscriptContext.blocksDigest(it.status) }) {
+                    dao.update(row.copy(error = "整体版尚未成功，等待两版后整理；可重转录，或在整体版选择本次仅切分版整理"))
+                    continue
+                }
+                if (wholeRows.any { it.status == "Done" && it.text.isNotBlank() && lines.none { line -> line.segmentId == it.segmentId } }) {
+                    dao.update(row.copy(status = "Failed", error = "切分版为空，整体版有内容，请重转录核对后重新生成"))
+                    continue
+                }
                 val claimed = db.writeTransaction {
                     val current = dao.get(row.id)
                     if (current?.revision != row.revision) false
                     else { dao.update(current.copy(status = "Summarizing")); true }
                 }
                 if (!claimed) continue
-                val result = if (row.kind == ImportKind.Normal.name) null else summary.generate(row, lines, dao.todos(row.id))
+                val result = if (row.kind == ImportKind.Normal.name) null else summary.generate(row, lines, dao.todos(row.id), wholeRows = wholeRows)
                 db.writeTransaction {
                     val current = dao.get(row.id) ?: return@writeTransaction
                     // 删除/改类型/重新转写期间，旧网络结果不得复活已删除的文字。
                     if (current.revision != row.revision) return@writeTransaction
+                    if (db.wholeTranscripts().getMany(segments.map { it.id }) != wholeRows) {
+                        dao.update(current.copy(status = "Transcribing")); return@writeTransaction
+                    }
                     if (dao.lines(row.id).map { it.copy(eventId = null, digestedAt = null) } != lines.map { it.copy(eventId = null, digestedAt = null) }) {
                         dao.update(current.copy(status = "Transcribing", revision = current.revision + 1))
                         return@writeTransaction

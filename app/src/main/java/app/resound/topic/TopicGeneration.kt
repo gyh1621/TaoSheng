@@ -57,7 +57,7 @@ internal class TopicGenerator(
     private val appName: String = "涛声",
 ) {
     suspend fun generate(g: TopicGroup, lines: List<TranscriptLineEntity>, unfinished: List<MemoryItemEntity>,
-        ignored: List<MemoryItemEntity>, unseparated: Set<Long> = emptySet(), session: TopicProcessingSession? = null): TopicOutput {
+        ignored: List<MemoryItemEntity>, unseparated: Set<Long> = emptySet(), session: TopicProcessingSession? = null, wholeRows: List<WholeTranscript> = emptyList()): TopicOutput {
         val row = g.row
         val words = (hotwords() + TopicPolicy.words(row.name)).distinct()
         val kind = TopicKind.valueOf(row.kind)
@@ -75,7 +75,7 @@ internal class TopicGenerator(
                 val text = DigestPrompt.withTodoContext(DigestPrompt.withHotwords(plain, words), unfinished, ignored)
                 val system = DigestPrompt.system(template(), Instant.ofEpochMilli(part.first().startAt).atZone(ZoneId.systemDefault()).toLocalDate(), appName) +
                     app.resound.topic.core.TopicGenerationRules.DIGEST_SUFFIX
-                val input = "$data\n$text"
+                val input = wholeDigestText("$data\n$text", part, wholeRows.filter { row -> part.any { it.segmentId == row.segmentId } })
                 var reply: LlmReply? = null
                 val call: suspend (String, String) -> String = { s, u ->
                     request(s, u).also { reply = it; model = it.actualModel ?: model }.content
@@ -100,13 +100,13 @@ internal class TopicGenerator(
         val acceptedLines = lines.filter { it.id in acceptedIds }
         val card = when (kind) {
             TopicKind.Normal -> null
-            TopicKind.Script -> script(g, acceptedLines, data, words, session)
+            TopicKind.Script -> script(g, acceptedLines, data, words, session, wholeRows)
             else -> {
                 val summary = ImportSummary(importTemplate, request, now, session)
                 summary.generate(ImportRecordRow(id = row.id, pendingId = "topic:${row.id}", fileName = row.name ?: kind.title,
                     kind = kind.name, startAt = start, endAt = end, byChannel = false),
                     if (kind == TopicKind.Training) acceptedLines.map { it.copy(speakerName = null, speakerTag = null) } else acceptedLines,
-                    unfinished + ignored, extraContext = DigestPrompt.withHotwords(context(g, acceptedLines), words)).card
+                    unfinished + ignored, extraContext = DigestPrompt.withHotwords(context(g, acceptedLines), words), wholeRows = wholeRows).card
                     .copy(entity = "topic:${row.id}")
             }
         }
@@ -115,7 +115,7 @@ internal class TopicGenerator(
     }
     private fun context(g: TopicGroup, lines: List<TranscriptLineEntity>) = app.resound.topic.core.TopicGenerationRules.context(g.snapshot(), lines.map { it.snapshot() })
 
-    private suspend fun script(g: TopicGroup, lines: List<TranscriptLineEntity>, context: String, words: List<String>, session: TopicProcessingSession?): SkillCardRow {
+    private suspend fun script(g: TopicGroup, lines: List<TranscriptLineEntity>, context: String, words: List<String>, session: TopicProcessingSession?, wholeRows: List<WholeTranscript>): SkillCardRow {
         val organized = mutableListOf<String>(); val verbatim = mutableListOf<String>()
         val chunks = if (session != null) TopicProcessingRules.chunks(lines, { line, text -> line.copy(text = text) }) { it.text } else ImportChunks.split(lines)
         session?.phase("整理口播稿", chunks.size)
@@ -124,7 +124,8 @@ internal class TopicGenerator(
         } catch (_: Exception) { throw LlmException(LlmError.Format) }
         for (chunk in chunks) {
             val read: suspend (List<TranscriptLineEntity>) -> Pair<String, String> = { part ->
-                val user = app.resound.topic.core.TopicGenerationRules.scriptInput(context, part.map { it.snapshot() }, words)
+                val plain = app.resound.topic.core.TopicGenerationRules.scriptInput(context, part.map { it.snapshot() }, words)
+                val user = wholeDigestText(plain + "\n句号对照：" + part.mapIndexed { index, line -> "${index + 1}=[L${line.id}]" }.joinToString(","), part, wholeRows.filter { row -> part.any { it.segmentId == row.segmentId } })
                 val text = session?.request(SCRIPT_PROMPT, user, { a, b -> request(a, b).content }, { parse(it) }, { parse(it).first })
                     ?: request(SCRIPT_PROMPT, user).content
                 parse(text)
@@ -159,6 +160,15 @@ internal class TopicEngine(
         val segments = dao.segments(g.row.id, now())
         if (segments.any { it.status in setOf("Pending", "Running") || it.status == "Failed" && it.attempts < 5 }) return true
         if (segments.any { it.status !in setOf("Done", "Empty", "SkippedEnv", "SkippedPlayback") }) throw TopicException("专题有未成功转写的录音，请重试转写后重新生成")
+        val wholeRows = db.wholeTranscripts().getMany(segments.map { it.id })
+        if (wholeRows.any { it.status == "Failed" }) {
+            val message = "整体版未成功，请重转录或在整体版选择本次仅切分版整理"
+            if (g.row.error != message) dao.update(g.row.copy(error = message))
+            return true
+        }
+        if (wholeRows.any { WholeTranscriptContext.blocksDigest(it.status) }) return true
+        val lines = dao.lines(g.row.id)
+        if (wholeRows.any { it.status == "Done" && it.text.isNotBlank() && lines.none { line -> line.segmentId == it.segmentId } }) throw TopicException("切分版为空，整体版有内容，请重转录核对后重新生成")
         return voiceprintReady() && db.memory().voiceprintPending(segments.filter { it.status == "Done" }.map { it.id }) > 0
     }
     /** 返回 true 表示仍在等录音落盘/转写/声纹；失败由用户显式 regenerate。 */
@@ -177,7 +187,8 @@ internal class TopicEngine(
             try {
                 if (waiting(g)) { pending = true; continue }
                 val lines = dao.lines(g.row.id)
-                val source = topicSource(g, lines)
+                val wholeRows = db.wholeTranscripts().getMany(lines.map { it.segmentId }.distinct())
+                val source = topicSource(g, lines, wholeRows)
                 session = TopicProcessingSession(g.row.id, source, checkpoints, ::topicHash, ::topicFailure, ::delay)
                 session.begin()
                 val claimed = db.writeTransaction {
@@ -189,11 +200,11 @@ internal class TopicEngine(
                 val retained = dao.items(g.row.retainedIds()).filterNot { it.deleted }
                 val unfinished = (db.memory().unfinishedForDigest() + retained.filter { it.status !in setOf("Done", "Ignored") }).distinctBy { it.id }
                 val ignored = (db.memory().ignoredForDigest(now() - 60L * 86_400_000) + retained.filter { it.status in setOf("Done", "Ignored") }).distinctBy { it.id }
-                val result = generator.generate(g, lines, unfinished, ignored, db.transcribe().unseparated(lines.map { it.segmentId }.distinct()).toSet(), session)
+                val result = generator.generate(g, lines, unfinished, ignored, db.transcribe().unseparated(lines.map { it.segmentId }.distinct()).toSet(), session, wholeRows)
                 val saved = db.writeTransaction {
                     val latest = dao.get(g.row.id) ?: return@writeTransaction false
                     if (latest.row.revision != revision || latest.row.status != "Summarizing") return@writeTransaction false
-                    if (dao.lines(g.row.id) != lines || waiting(latest)) {
+                    if (dao.lines(g.row.id) != lines || db.wholeTranscripts().getMany(lines.map { it.segmentId }.distinct()) != wholeRows || waiting(latest)) {
                         dao.update(latest.row.copy(status = "Ended")); pending = true; return@writeTransaction false
                     }
                     val previousEvent = latest.row.eventId?.let { db.memory().event(it) }

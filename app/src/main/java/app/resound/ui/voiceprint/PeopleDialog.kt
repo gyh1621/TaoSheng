@@ -225,7 +225,7 @@ fun SpeakerSegmentationSettings() {
                 }
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    if (downloaded) "本地转写时先分出不同的人。人多嘈杂时可能分错，长按原话可纠正。"
+                    if (downloaded) "本地及自定义转写时先在手机分出不同的人。人多嘈杂时可能分错，长按切分版原话可纠正。"
                     else "需要先下载约 7 MB 的模型。",
                     style = RsType.caption, color = c.textSecondary,
                 )

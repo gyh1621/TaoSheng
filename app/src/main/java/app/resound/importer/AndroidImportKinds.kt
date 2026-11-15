@@ -32,8 +32,9 @@ class AndroidImportKinds internal constructor(
         scope.launch(Dispatchers.IO) {
             // 查询关系表会同时观察转写/认人状态；进程重启也恢复 Summarizing。
             enqueue(context)
-            db.imports().observeSummaryReady()
-                .distinctUntilChanged().collect { if (it.isNotEmpty()) enqueue(context) }
+            combine(db.imports().observeSummaryReady(), db.wholeTranscripts().observeAll()
+                .map { rows -> rows.map { Triple(it.segmentId, it.generation, it.status) } }.distinctUntilChanged()
+            ) { ids, whole -> ids to whole }.distinctUntilChanged().collect { (ids, _) -> if (ids.isNotEmpty()) enqueue(context) }
         }
     }
     override suspend fun suggest(pendingId: String): KindSuggestion = withContext(Dispatchers.IO) {

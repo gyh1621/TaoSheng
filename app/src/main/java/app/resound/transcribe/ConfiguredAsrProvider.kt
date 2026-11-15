@@ -27,6 +27,7 @@ internal fun customAsrBody(audio: AsrAudio, model: String, words: List<String>, 
  * MiniMax 等服务出错时返回 {"base_resp":{"status_code":…}}，这里只按固定文案提示，不回显服务端原文。
  */
 internal fun transcriptionText(json: JSONObject): String {
+    requireCompleteCustomTranscript(json.toString())
     if (json.has("text")) return json.optString("text").trim()
     val code = json.optJSONObject("base_resp")?.optInt("status_code", 0) ?: 0
     if (code == 1004) throw AsrException(AsrError.Auth, detail = "鉴权失败，请检查密钥")
@@ -93,7 +94,7 @@ class CustomAsrProvider(private val settings: AndroidTranscribeSettings, private
 class ConfiguredAsrProvider(context:Context,private val settings:AndroidTranscribeSettings, private val hotwords: () -> List<String> = { emptyList() }):AsrProvider {
     private val doubao=DoubaoAsrProvider(AsrAudioReader(context.cacheDir), hotwords = hotwords, headers = { settings.headers(TranscribeSource.Doubao.name) })
     private val local=LocalAsrProvider(context,settings,hotwords)
-    private val custom=CustomAsrProvider(settings, hotwords)
+    private val custom=CustomSpeakerAsrProvider(context, settings, CustomAsrProvider(settings, hotwords))
     override suspend fun recognize(audio:AsrAudio,key:String,beforeAudio:suspend()->Unit):AsrResult = recognize(settings.source.value, audio, key, beforeAudio)
     internal suspend fun recognize(source: TranscribeSource, audio: AsrAudio, key: String, beforeAudio: suspend () -> Unit): AsrResult = when(source){
         // 073 审核：同批没有节省时长，默认不剪音，也不为剪音额外解码。

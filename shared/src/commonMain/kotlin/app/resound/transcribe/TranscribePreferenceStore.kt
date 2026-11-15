@@ -44,6 +44,15 @@ class TranscribePreferenceStore(
     }
     fun recordNpuCheck(key: String, ok: Boolean) { saveLocalString("npuCheck", "${if (ok) "pass" else "fail"}:$key") }
     val customEndpoint get() = readString("endpoint", "")!!
+    private val _alignmentEndpoint = MutableStateFlow(readString("alignmentEndpoint", "")!!)
+    val alignmentEndpoint = _alignmentEndpoint.asStateFlow()
+    fun setAlignmentEndpoint(value: String) {
+        val endpoint = value.trim()
+        if (endpoint.isNotEmpty()) validateEndpoint(endpoint, CustomEndpointMode.Full)
+        check(saveString("alignmentEndpoint", endpoint)) { "对齐地址保存失败" }
+        _alignmentEndpoint.value = endpoint
+        onChanged()
+    }
     val customModel get() = readString("model", "")!!
     /** 自定义地址的写法：自动补路径（OpenAI 兼容）或按填写的原样请求（MiniMax 等）。 */
     private val _endpointMode = MutableStateFlow(runCatching { CustomEndpointMode.valueOf(readString("endpointMode", CustomEndpointMode.Auto.name)!!) }.getOrDefault(CustomEndpointMode.Auto))

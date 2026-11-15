@@ -119,6 +119,8 @@ class RoomPrivacyActions(
                     events += target.mapNotNull { it.eventId }
                     dao.deleteSamples(segment.id)
                     dao.deleteExclusions(segment.id)
+                    // Whole text cannot safely retain only the forgotten event: erase it all.
+                    db.wholeTranscripts().invalidate(segment.id)
                     if (PrivacyRules.deleteWholeSegment(source.size, target.size)) {
                         if (!keepEvents) items += dao.deleteLineItems(segment.id)
                         dao.deleteLineVectors(segment.id)

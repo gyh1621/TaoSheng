@@ -13,6 +13,8 @@ import app.resound.transcribe.TranscriptRepository
  * 底层实现完成前，界面用 ui/preview 里的假数据开发。
  */
 object AppGraph {
+    lateinit var wholeTranscripts: app.resound.data.WholeTranscriptDao
+    val isWholeTranscriptsReady: Boolean get() = ::wholeTranscripts.isInitialized
     /** 启动时从平台 KeyValueStore 读取一次；修改后重启生效。 */
     internal var legacyNetwork: Boolean = false
         private set

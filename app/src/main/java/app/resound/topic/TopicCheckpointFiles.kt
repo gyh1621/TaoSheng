@@ -71,5 +71,5 @@ internal fun topicFailure(e: Throwable) = when (e) {
     else -> TopicFailure(TopicFailureKind.Permanent, "本地处理未完成，请重试")
 }
 
-internal fun topicSource(g: TopicGroup, lines: List<app.resound.data.TranscriptLineEntity>): String =
-    topicHash(TopicProcessingRules.source(g.snapshot(), lines.map { it.snapshot() }))
+internal fun topicSource(g: TopicGroup, lines: List<app.resound.data.TranscriptLineEntity>, wholeRows: List<app.resound.data.WholeTranscript> = emptyList()): String =
+    topicHash(TopicProcessingRules.source(g.snapshot(), lines.map { it.snapshot() }) + wholeRows.sortedBy { it.segmentId }.joinToString("\n") { "${it.segmentId}:${it.generation}:${it.status}:${it.text}" })

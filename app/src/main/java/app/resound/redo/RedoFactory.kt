@@ -21,6 +21,8 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
     situation: app.resound.context.SituationLookup? = null,
 ): RedoEngine {
     val provider = ConfiguredAsrProvider(context, settings, hotwords)
+    val whole = WholeTranscribeRunner(db.wholeTranscripts(), db.transcribe(), CustomAsrProvider(settings, hotwords),
+        { settings.credential(TranscribeSource.Custom) }, { settings.ready(TranscribeSource.Custom) && network(TranscribeSource.Custom) }, settings::identity)
     val files = SkillFiles(context)
     return RedoEngine(db, chooser, recognize = { segment, source ->
         val timing = SegmentTimings(segment.id, source, segment.endAt - segment.startAt)
@@ -29,8 +31,9 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
         val began = System.currentTimeMillis()
         val key = settings.credential(source)
         var sent = 0L; var error: AsrError? = null; var outcome = "Failed"; var log: String? = null
+        val distinguish = segment.separateSpeakers != false && !db.topics().trainingAt(segment.startAt)
         try {
-            val result = provider.recognize(source, AsrAudio(File(segment.path), File(segment.path).extension, segment.endAt - segment.startAt, separateSpeakers = segment.separateSpeakers ?: true), key) {
+            val result = provider.recognize(source, AsrAudio(File(segment.path), File(segment.path).extension, segment.endAt - segment.startAt, separateSpeakers = distinguish, speakerCount = segment.speakerCount), key) {
                 if (source != TranscribeSource.Local) {
                     sent = segment.endAt - segment.startAt
                     db.transcribe().reserveAudio(LocalDate.now().toString(), sent, segment.id)
@@ -39,21 +42,31 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
             outcome = if (result.sentences.isEmpty()) "Empty" else "Done"
             log = TranscribePolicy.safeLogId(result.logId, key)
             chooser.record(source, segment.endAt - segment.startAt, System.currentTimeMillis() - began)
-            result
+            result.copy(sentences = result.sentences.map { line ->
+                line.copy(speakerTag = segment.importChannel?.takeIf { !distinguish && segment.speakerCount != 0 }?.let { "channel:$it" } ?: line.speakerTag.takeIf { distinguish })
+            })
         } catch (e: CancellationException) { error = AsrError.Interrupted; throw e }
         catch (e: AsrException) { error = e.type; throw e }
         finally { withContext(NonCancellable) { db.transcribe().attempt(AsrAttemptEntity(segmentId = segment.id, at = began,
             result = outcome, errorType = error?.name, elapsedMillis = System.currentTimeMillis() - began, sentMillis = sent, logId = log))
             timing.outcome = outcome; PipelineTimes.recordSegment(context, timing.line()) } }
         }
+    }, afterTranscribe = { segment, source ->
+        if (source == TranscribeSource.Custom) {
+            db.wholeTranscripts().enqueue(segment.id, System.currentTimeMillis(), replace = true)
+            whole.runPending()
+        } else db.wholeTranscripts().invalidate(segment.id)
     }, digest = { lines, presetId ->
+        check(db.wholeTranscripts().getMany(lines.map { it.segmentId }.distinct()).none { WholeTranscriptContext.blocksDigest(it.status) }) {
+            WholeTranscriptContext.WAITING
+        }
         val (preset, key) = synchronized(digestSettings.providers.guard) {
             require(presetId == null || digestSettings.presets.any { it.id == presetId }) { "重做所选服务商已删除，请重新选择" }
             digestSettings.skillCredentials(presetId)
         }
         val contextPrompt = SituationPrompt(digestSettings.includeSituation.value, situation)
         val (text, indexed) = contextPrompt.transcript(lines, unseparated = db.transcribe().unseparated(lines.map { it.segmentId }.distinct()).toSet())
-        val input = DigestPrompt.withTodoContext(DigestPrompt.withHotwords(text, hotwords()), db.memory().unfinishedForDigest(), db.memory().ignoredForDigest(System.currentTimeMillis() - 60L * 86_400_000))
+        val input = DigestPrompt.withTodoContext(DigestPrompt.withHotwords(wholeDigestText(text, indexed, db.wholeTranscripts().getMany(indexed.map { it.segmentId }.distinct())), hotwords()), db.memory().unfinishedForDigest(), db.memory().ignoredForDigest(System.currentTimeMillis() - 60L * 86_400_000))
         val reply = digestSettings.failover.request("重新整理", db.memory(), app.resound.usage.UsagePurpose.Digest, digestSettings.digestRequest(llm))(preset, key, contextPrompt.system(DigestPrompt.system(template(), LocalDate.now(), context.appName)), input)
         withContext(NonCancellable) { db.memory().addUsage(LocalDate.now().toString(), reply.promptTokens, reply.completionTokens, UsagePurpose.Digest) }
         val (events, items) = DigestPrompt.parse(reply.content, indexed, diagnostics = reply.diagnostics)

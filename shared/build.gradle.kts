@@ -20,6 +20,7 @@ kotlin {
         iosSimulatorArm64()
     }
     sourceSets {
+        commonTest.dependencies { implementation(kotlin("test")) }
         commonMain.dependencies {
             api("androidx.room:room-runtime:2.8.4")
             api("androidx.sqlite:sqlite:2.6.2")

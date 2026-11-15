@@ -493,8 +493,10 @@ private fun LineRow(line: TranscriptLine) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
         Text(formatClock(line.startAt), style = RsType.caption, color = c.textTertiary, modifier = Modifier.widthIn(min = 44.dp).padding(top = 2.dp))
         Column(Modifier.weight(1f)) {
-            line.speakerName?.let { Text(it, style = RsType.caption.copy(fontWeight = FontWeight.Medium), color = if (it == "我") c.accent else c.textSecondary) }
-            Text(line.text, style = RsType.body, color = c.text)
+            app.resound.ui.transcript.TranscriptVersions(listOf(line.segmentId)) {
+                line.speakerName?.let { Text(it, style = RsType.caption.copy(fontWeight = FontWeight.Medium), color = if (it == "我") c.accent else c.textSecondary) }
+                Text(line.text, style = RsType.body, color = c.text)
+            }
         }
     }
 }

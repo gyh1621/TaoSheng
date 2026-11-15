@@ -33,7 +33,10 @@ internal class TopicFeature(val repository: RoomTopicRepository, val engine: Top
         fun create(app: ResoundApp, db: CaptureDatabase, settings: AndroidDigestSettings, llm: LlmClient,
             hotwords: () -> List<String>): TopicFeature {
             val checkpoints = TopicCheckpointFiles(app) { id ->
-                db.topics().get(id)?.takeIf { it.row.status != "Cancelled" }?.let { topicSource(it, db.topics().lines(id)) }
+                db.topics().get(id)?.takeIf { it.row.status != "Cancelled" }?.let {
+                    val lines = db.topics().lines(id)
+                    topicSource(it, lines, db.wholeTranscripts().getMany(lines.map { line -> line.segmentId }.distinct()))
+                }
             }
             val repository = RoomTopicRepository(db, app.scope, AppGraph.platform.now, AppGraph.platform.zone, quiet = { start, end ->
                 val rules = app.quietSchedule.rules.value
@@ -68,7 +71,7 @@ internal class TopicFeature(val repository: RoomTopicRepository, val engine: Top
             repository.onEnded = { app.runTranscriptionNow(); TopicWork.enqueue(app) }
             repository.onReminder = { id, type -> TopicNotifications.show(app, id, type) }
             app.scope.launch {
-                db.invalidationTracker.createFlow("topics", "topic_spans", "topic_marks").collect { checkpoints.refresh() }
+                db.invalidationTracker.createFlow("topics", "topic_spans", "topic_marks", "whole_transcripts").collect { checkpoints.refresh() }
             }
             app.scope.launch {
                 repository.tick()
@@ -81,7 +84,9 @@ internal class TopicFeature(val repository: RoomTopicRepository, val engine: Top
             }
             app.scope.launch {
                 db.topics().observePendingIds().whileTopicsPending { ids ->
-                    db.topics().observeProgress(ids).map { ids to it }
+                    kotlinx.coroutines.flow.combine(db.topics().observeProgress(ids),
+                        db.wholeTranscripts().observeAll().map { rows -> rows.map { Triple(it.segmentId, it.generation, it.status) } }.distinctUntilChanged()
+                    ) { progress, whole -> ids to (progress to whole) }
                 }.collect { (ids, _) ->
                     checkpoints.refresh(ids.toSet())
                     TopicWork.enqueue(app)

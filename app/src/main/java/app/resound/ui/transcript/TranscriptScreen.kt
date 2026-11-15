@@ -421,6 +421,7 @@ private fun SettingsCard(settings: TranscribeSettings, onSaved: () -> Unit) {
                 CustomModelForm(advanced.customEndpoint,advanced.customModel,hasKey,
                     "自定义音频转写服务",advanced::fetchModels,advanced::saveCustomAll,
                     app.resound.ui.settings.EndpointModeUi(advanced.customEndpointMode,advanced.customPrompt,advanced::setCustomPrompt,advanced::saveCustomAll))
+                app.resound.ui.settings.CustomAsrOptions(advanced)
 
             }
             // 卡 116：豆包和自定义转写服务各存一组请求头；本地转写不联网，不需要
@@ -740,11 +741,11 @@ private fun SegmentCard(seg: SegmentTranscript, modifier: Modifier, realtime: Bo
         Spacer(Modifier.height(10.dp))
         AnimatedContent(seg.status, transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(150)) }, label = "segBody") { status ->
             when (status) {
-                TranscriptStatus.Done -> SpeakerLines(seg.lines)
+                TranscriptStatus.Done -> TranscriptVersions(listOf(seg.segmentId)) { SegmentedSpeakerLines(seg.lines) }
                 TranscriptStatus.Running -> Placeholder()
                 TranscriptStatus.Pending -> Note(if (realtime) "马上转写" else "等下一轮转写")
-                TranscriptStatus.Empty -> Note("只有声音，没识别出说话内容")
-                TranscriptStatus.Failed -> Note(seg.error ?: "没转成功，可以在上面点重试", c.critical)
+                TranscriptStatus.Empty -> EmptySegmentVersions(seg.segmentId) { Note("只有声音，没识别出说话内容") }
+                TranscriptStatus.Failed -> TranscriptVersions(listOf(seg.segmentId)) { Note(seg.error ?: "没转成功，可以在上面点重试", c.critical) }
                 TranscriptStatus.SkippedPlayback -> Row(verticalAlignment = Alignment.CenterVertically) {
                     Note("手机外放声音时录的，没有转写", modifier = Modifier.weight(1f))
                     if (seg.audioAvailable) Pill("仍然转写", filled = false, onClick = onTranscribeAnyway)
@@ -818,6 +819,11 @@ fun runLabel(done: Int, total: Int, verb: String = "转写中") = if (total > 0)
 /** 原话：同一说话人连续的句子并成一组，左侧是说话人标记。 */
 @Composable
 fun SpeakerLines(lines: List<TranscriptLine>) {
+    TranscriptVersions(lines.map { it.segmentId }) { SegmentedSpeakerLines(lines) }
+}
+
+@Composable
+private fun SegmentedSpeakerLines(lines: List<TranscriptLine>) {
     val c = Rs.colors
     val voiceprint = LocalVoiceprint.current
     val context = LocalContext.current

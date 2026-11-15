@@ -406,8 +406,10 @@ private fun ColumnScope.TryIt(capture: CaptureController, transcripts: Transcrip
     RsCard(Modifier.fillMaxWidth(), padding = PaddingValues(horizontal = 18.dp, vertical = 16.dp)) {
         Text("转写", style = RsType.caption, color = c.textTertiary)
         Spacer(Modifier.height(6.dp))
-        Text(line?.text ?: "等你说话…（本机模型还在准备时，下载完会自动转写）", style = RsType.body,
-            color = if (line != null) c.text else c.textTertiary)
+        app.resound.ui.transcript.TranscriptVersions(listOfNotNull(line?.segmentId)) {
+            Text(line?.text ?: "等你说话…（本机模型还在准备时，下载完会自动转写）", style = RsType.body,
+                color = if (line != null) c.text else c.textTertiary)
+        }
         if (line != null && hasKey) {
             Box(Modifier.padding(vertical = 14.dp).fillMaxWidth().height(0.5.dp).background(c.separator))
             Text("整理", style = RsType.caption, color = c.textTertiary)

@@ -42,6 +42,7 @@ class DigestRunner(
     private val unseparated: suspend (List<Long>) -> List<Long> = { emptyList() },
     private val thingExtraction: app.resound.things.DigestThingExtraction? = null,
     private val request: suspend (LlmPreset, String, String, String) -> LlmReply = settings.digestRequest(client),
+    private val wholeTranscripts: suspend (List<Long>) -> List<app.resound.data.WholeTranscript> = { emptyList() },
     private val situation: app.resound.context.SituationLookup? = null,
 ) {
     private val diagnostics = app.resound.diagnostics.LlmDiagnostics(context)
@@ -104,7 +105,12 @@ class DigestRunner(
                 chunks.addAll(batches(ready))
             }
             _progress.value = _progress.value.copy(total = chunks.sumOf { it.size }, batches = chunks.size)
+            var waitingForWhole = false
             for ((index, chunk) in chunks.withIndex()) {
+                if (wholeTranscripts(chunk.map { it.segmentId }.distinct()).any { WholeTranscriptContext.blocksDigest(it.status) }) {
+                    waitingForWhole = true
+                    continue
+                }
                 if (!networkAllowed() && cached(chunk, preset) == null) { record(now(), "等待网络"); return true }
                 _progress.value = _progress.value.copy(batch = index + 1, batchStartedAt = elapsed())
                 val refreshed = dao.refreshLines(chunk.map { it.id })
@@ -114,7 +120,7 @@ class DigestRunner(
                     LlmError.Network, LlmError.Server, LlmError.RateLimit, LlmError.Format -> { record(now(), failureDetail ?: outcome.human); return retryFailure }
                 }
             }
-            record(now(), null)
+            record(now(), if (waitingForWhole) WholeTranscriptContext.WAITING else null)
             return false
         } catch (e: CancellationException) { throw e }
         catch (e: LlmInputLimitException) { record(now(), e.message); return false }
@@ -143,10 +149,12 @@ class DigestRunner(
     private fun hash(value: String): String = java.security.MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
-    private fun identity(lines: List<TranscriptLineEntity>) = "batch-v2:" + hash(JSONArray(lines.map { it.toString() }).toString())
+    private suspend fun identity(lines: List<TranscriptLineEntity>) = "batch-dual-v1:" + hash(JSONArray(lines.map { it.toString() }).toString() + wholeTranscripts(lines.map { it.segmentId }.distinct()).toString())
 
-    private fun matches(row: PendingDigest, lines: List<TranscriptLineEntity>, primary: LlmPreset): Boolean {
-        if (row.id.startsWith("batch-v2:")) return row.id == identity(lines)
+    private suspend fun matches(row: PendingDigest, lines: List<TranscriptLineEntity>, primary: LlmPreset): Boolean {
+        if (row.id.startsWith("batch-dual-v1:")) return row.id == identity(lines)
+        if (wholeTranscripts(lines.map { it.segmentId }.distinct()).isNotEmpty()) return false
+        if (row.id.startsWith("batch-v2:")) return row.id == "batch-v2:" + hash(JSONArray(lines.map { it.toString() }).toString())
         val presets = (settings.presets + primary).distinct()
         return presets.any { row.id == hash(it.toString() + JSONArray(lines.map { line -> line.toString() })) }
     }
@@ -169,7 +177,7 @@ class DigestRunner(
             val unfinished = dao.unfinishedForDigest()
             val candidates = unfinished.map { it.id }.toSet()
             val ignored = dao.ignoredForDigest(now() - 60L * 86_400_000)
-            val input = DigestPrompt.withTodoContext(DigestPrompt.withHotwords(text, hotwords()), unfinished, ignored)
+            val input = DigestPrompt.withTodoContext(DigestPrompt.withHotwords(wholeDigestText(text, indexed, wholeTranscripts(indexed.map { it.segmentId }.distinct())), hotwords()), unfinished, ignored)
             var thingBatch = thingExtraction?.prepare(indexed)
             val cached = cached(lines, preset)
             storedId = cached?.id ?: batchId

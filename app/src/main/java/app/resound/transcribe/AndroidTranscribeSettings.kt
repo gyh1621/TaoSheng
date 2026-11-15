@@ -43,6 +43,8 @@ class AndroidTranscribeSettings internal constructor(private val context: Contex
     val localStatus get() = preferences.localStatus
     val modelRevision get() = preferences.modelRevision
     val customEndpoint get() = preferences.customEndpoint
+    val alignmentEndpoint get() = preferences.alignmentEndpoint
+    fun setAlignmentEndpoint(value: String) = preferences.setAlignmentEndpoint(value)
     val customModel get() = preferences.customModel
     val endpointMode get() = preferences.endpointMode
     val customEndpointMode get() = preferences.customEndpointMode
@@ -74,8 +76,12 @@ class AndroidTranscribeSettings internal constructor(private val context: Contex
     private fun validateEndpoint(endpoint: String, mode: CustomEndpointMode) {
         if (mode == CustomEndpointMode.Full) fullEndpoint(endpoint) else OpenAiEndpoint.bases(endpoint)
     }
-    fun identity() = "${source.value}:${backend.value}:${endpointMode.value.name}:$customEndpoint:$customModel:${keyFingerprint(if(source.value==TranscribeSource.Local) "" else readKey())}:${keyFingerprint(org.json.JSONArray(headers(source.value.name).map { listOf(it.name, it.value) }).toString())}" +
-        if (source.value == TranscribeSource.Local) ":${language.value.code}" else ""
+    // Historical retries can select Custom while the current global source is Local.
+    fun identity() = "${source.value}:${backend.value}:${endpointMode.value}:$customEndpoint:$customModel:${alignmentEndpoint.value}:${language.value.code}:${localPrefs.getBoolean("speakers-enabled", true)}:" +
+        TranscribeSource.entries.joinToString(":") { source ->
+            keyFingerprint(if (source == TranscribeSource.Local) "" else readKey(source)) +
+                keyFingerprint(org.json.JSONArray(headers(source.name).map { listOf(it.name, it.value) }).toString())
+        }
     internal fun credential(source: TranscribeSource) = if (source == TranscribeSource.Local) "local-model" else readKey(source)
     internal fun ready(source: TranscribeSource): Boolean = when (source) {
         TranscribeSource.Local -> modelReady(if (backend.value == app.resound.transcribe.local.LocalBackend.Npu && app.resound.transcribe.local.LocalModels.npuSupported()) backend.value else app.resound.transcribe.local.LocalBackend.Cpu)

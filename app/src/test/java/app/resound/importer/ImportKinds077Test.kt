@@ -67,6 +67,32 @@ class ImportKinds077Test {
             startAt = id * 1000, endAt = id * 1000 + 1500, text = "我会提交报告", speakerTag = "0", speakerName = "我")))
     }
 
+    @Test fun wholeVersionAccompaniesSameImportSegmentWithoutInventingCitation() = runBlocking {
+        val r = record(); segment(r, 1)
+        val requests = mutableListOf<String>()
+        summary { _, user -> requests += user; reply() }.generate(r, db.imports().lines(r.id),
+            wholeRows = listOf(WholeTranscript(1, text = "整体上下文内容", status = "Done"),
+                WholeTranscript(99, text = "无关录音绝不可带入", status = "Done")))
+        assertTrue(requests.single().contains("整体上下文内容"))
+        assertTrue(requests.single().contains("[L1]"))
+        assertFalse(requests.single().contains("无关录音绝不可带入"))
+    }
+
+    @Test fun failedWholeBlocksImportUntilUserExplicitlyChoosesSegmentedOnly() = runBlocking {
+        val r = record(); segment(r, 1)
+        db.wholeTranscripts().enqueue(1, 1)
+        val generation = db.wholeTranscripts().get(1)!!.generation
+        db.wholeTranscripts().claim(1, generation)
+        db.wholeTranscripts().fail(1, generation, "失败", 2)
+        var calls = 0
+        val engine = ImportKindEngine(db, summary { _, _ -> calls++; reply() })
+        engine.run()
+        assertEquals(0, calls)
+        db.wholeTranscripts().useSegmentedOnly(1)
+        engine.run()
+        assertTrue(calls > 0)
+    }
+
     @Test fun suggestionsPreferCallCluesThenLastThenMeeting() {
         assertEquals(KindReason.CallFolder, ImportKindPolicy.suggest("录音", "primary:MIUI/sound_recorder/call_rec/a.m4a", false, ImportKind.Training).reason)
         for (name in listOf("通话录音.m4a", "13800138000_20261030.m4a", "010-88888888.m4a"))

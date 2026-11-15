@@ -1206,7 +1206,9 @@ internal fun ItemSheet(opened: MemoryItem, memory: MemoryRepository, onOpenEvent
                         SourceAudioButton(source, lines, item, memory)
                     }
                     Spacer(Modifier.height(4.dp))
-                    Text("“${source.text}”", style = RsType.body, color = c.text)
+                    app.resound.ui.transcript.TranscriptVersions(listOf(source.segmentId)) {
+                        Text("“${source.text}”", style = RsType.body, color = c.text)
+                    }
                 } else if (!linesLoading && eventLines.orEmpty().isNotEmpty()) {
                     // 找不到具体是哪一句（整理时没标出来，或重新转写后原话换了一批）：给出这件事的原话，可以从头听
                     val all = eventLines.orEmpty()
@@ -1215,8 +1217,10 @@ internal fun ItemSheet(opened: MemoryItem, memory: MemoryRepository, onOpenEvent
                         SourceAudioButton(all.first(), all, item, memory, lead = 0L)
                     }
                     Spacer(Modifier.height(4.dp))
-                    all.take(3).forEach { Text("“${it.text}”", style = RsType.body, color = c.text, maxLines = 2, overflow = TextOverflow.Ellipsis) }
-                    if (all.size > 3) Text("还有 ${all.size - 3} 句，点“查看来源”看全部", style = RsType.caption, color = c.textTertiary)
+                    app.resound.ui.transcript.TranscriptVersions(all.map { it.segmentId }) {
+                        all.take(3).forEach { Text("“${it.text}”", style = RsType.body, color = c.text, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                        if (all.size > 3) Text("还有 ${all.size - 3} 句，点“查看来源”看全部", style = RsType.caption, color = c.textTertiary)
+                    }
                 } else Text(if (linesLoading) "原话加载中…" else "没有找到对应的原话（可能已删除）", style = RsType.subhead, color = c.textTertiary)
             }
             // 点了“听原声”：就在详情里展开播放器

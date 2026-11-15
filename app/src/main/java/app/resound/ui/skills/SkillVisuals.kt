@@ -248,8 +248,10 @@ private fun FieldBlock(field: SkillField, v: FieldValue, icon: String, onQuote: 
                     Box(Modifier.width(3.dp).height(36.dp).clip(CircleShape).background(ink.copy(alpha = 0.6f)))
                     Spacer(Modifier.width(10.dp))
                     Column {
-                        Text("${q.speaker} · ${clock(q.at)}", style = RsType.caption, color = c.textTertiary)
-                        Text("“${q.text}”", style = RsType.subhead, color = c.text)
+                        app.resound.ui.transcript.LineTranscriptVersions(q.lineId) {
+                            Text("${q.speaker} · ${clock(q.at)}", style = RsType.caption, color = c.textTertiary)
+                            Text("“${q.text}”", style = RsType.subhead, color = c.text)
+                        }
                     }
                 }
             }

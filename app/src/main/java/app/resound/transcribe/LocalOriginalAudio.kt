@@ -17,6 +17,7 @@ class LocalOriginalAudio(
     private val guard: suspend (suspend (Set<Long>) -> Unit) -> Unit = { it(emptySet()) },
     private val playback: PlaybackCaptureHold,
     private val now: () -> Long = System::currentTimeMillis,
+    private val extraPending: suspend () -> Set<Long> = { emptySet() },
 ) : OriginalAudio {
     override val retentionDays = MutableStateFlow(prefs.getInt("originalRetentionDays", DEFAULT_RETENTION_DAYS).takeIf { it in RETENTION_DAY_RANGE } ?: DEFAULT_RETENTION_DAYS)
     override val keepStarred = MutableStateFlow(prefs.getBoolean("originalKeepStarred", true))
@@ -49,9 +50,9 @@ class LocalOriginalAudio(
     }
     override fun usage(): Flow<AudioUsage> = flow {
         while (currentCoroutineContext().isActive) {
-            val rows = existing(); val stars = dao.starredAudio().toSet()
+            val rows = existing(); val stars = dao.starredAudio().toSet(); val wholePending = extraPending()
             emit(AudioUsage(rows.sumOf { File(it.path).length() }, rows.filter { it.id in stars }.sumOf { File(it.path).length() },
-                days(rows), rows.count(::pending)))
+                days(rows), rows.count { pending(it) || it.id in wholePending }))
             delay(5_000)
         }
     }.distinctUntilChanged().flowOn(Dispatchers.IO)
@@ -60,9 +61,9 @@ class LocalOriginalAudio(
         var result = AudioTrim(0, 0, 0, 0)
         val action: suspend (Set<Long>) -> Unit = { reading ->
             val timestamp = now(); dao.refreshFailures(timestamp)
-            val rows = existing(); val stars = dao.starredAudio().toSet()
+            val rows = existing(); val stars = dao.starredAudio().toSet(); val wholePending = extraPending()
             val candidates = rows.filter { s ->
-                !pending(s) && s.id !in reading && (includeStarred || s.id !in stars) && (range == null || s.startAt in range) &&
+                !pending(s) && s.id !in wholePending && s.id !in reading && (includeStarred || s.id !in stars) && (range == null || s.startAt in range) &&
                     (retention == null || (timestamp - (s.completedAt ?: s.firstFailedAt ?: timestamp) >= (if (s.status == "SkippedEnv") maxOf(1, retention) else retention) * 86_400_000L))
             }
             var bytes = 0L
@@ -70,7 +71,7 @@ class LocalOriginalAudio(
                 val file = File(s.path); val size = file.length()
                 (!delete || file.delete()).also { if (it) bytes += size }
             }
-            result = AudioTrim(bytes, days(removed), removed.size, rows.count { pending(it) || it.id in reading })
+            result = AudioTrim(bytes, days(removed), removed.size, rows.count { pending(it) || it.id in wholePending || it.id in reading })
         }
         guard(action)
         return result

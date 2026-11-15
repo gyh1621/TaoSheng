@@ -6,6 +6,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -125,8 +128,12 @@ private fun Bar(inline: Boolean = false) {
                 PlayButton(40.dp)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f).springClick { expanded = true }) {
-                    Text(lines.getOrNull(idx)?.text ?: "正在播放原声", style = RsType.subhead.copy(fontWeight = FontWeight.Medium), color = c.text,
-                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    Column(Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState())) {
+                        TranscriptVersions(listOfNotNull(lines.getOrNull(idx)?.segmentId)) {
+                            Text(lines.getOrNull(idx)?.text ?: "正在播放原声", style = RsType.subhead.copy(fontWeight = FontWeight.Medium), color = c.text,
+                                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        }
+                    }
                     Text((if (segs > 1) "第 ${segIdx + 1}/$segs 段 · " else "") + "${mmss((frac * total).toLong())} / ${mmss(total)}",
                         style = RsType.caption, color = c.textTertiary, maxLines = 1)
                 }
@@ -160,6 +167,8 @@ private fun Bar(inline: Boolean = false) {
                     }
                     IconCircle(c.fill, onClick = { LinePlayer.stop() }) { CloseIcon(c.textTertiary) }
                 }
+                Column(Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
+                    TranscriptVersions(listOfNotNull(lines.getOrNull(idx)?.segmentId)) {
                 Column(Modifier.fillMaxWidth().height(92.dp), verticalArrangement = Arrangement.Center) {
                     // 三行一直排满：开头没有上一句时当前句往上顶，结尾没有下一句时往下沉
                     val first = (idx - 1).coerceAtMost(lines.size - 3).coerceAtLeast(0)
@@ -168,6 +177,8 @@ private fun Bar(inline: Boolean = false) {
                         Text(lines.getOrNull(k)?.text ?: "", maxLines = if (main) 2 else 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                             style = if (main) RsType.body.copy(fontWeight = FontWeight.SemiBold) else RsType.caption,
                             color = if (main) c.text else c.textTertiary, modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp))
+                    }
+                }
                     }
                 }
                 SeekBar(frac, onDrag = { dragging = it }, onDone = { f -> LinePlayer.seekFraction(f); dragging = null })

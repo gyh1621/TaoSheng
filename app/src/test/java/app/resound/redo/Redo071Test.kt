@@ -48,14 +48,14 @@ class Redo071Test {
         db.capture().segment(SegmentEntity(id, start, start + 2000, "mic", file.path, 5, "Done", completedAt = 1))
         db.transcribe().insertLines(listOf(TranscriptLineEntity(id, id, start, start + 2000, "旧原话", null, eventId = id, digestedAt = 1)))
     }
-    private fun engine(onDigest: suspend () -> Unit = {}, onRecognize: (TranscribeSource) -> Unit = {}) = RedoEngine(db, chooser,
+    private fun engine(onDigest: suspend () -> Unit = {}, onRecognize: (TranscribeSource) -> Unit = {}, onAfter: suspend (SegmentEntity, TranscribeSource) -> Unit = { _, _ -> }) = RedoEngine(db, chooser,
         recognize = { _, source -> onRecognize(source); AsrResult(listOf(AsrSentence(0, 2000, "新原话", null)), 2000, null) },
         digest = { lines, preset ->
             onDigest()
             val e = event(0, lines.minOf { it.startAt }, lines.maxOf { it.endAt }, false).copy(title = "新事件", model = preset ?: "default")
             RedoDigest(listOf(e to lines.map { it.id })) { ids -> listOf(MemoryItemEntity(eventId = ids[0], category = "待办", kind = null,
                 content = "交报告", dueText = null, dueAt = null, who = null, lineId = lines.first().id, status = "Pending", createdAt = 10)) }
-        }, now = { 100 })
+        }, afterTranscribe = onAfter, now = { 100 })
     private suspend fun run(e: RedoEngine, id: String = "one", request: RedoRequest = RedoRequest(eventIds = listOf(1), scope = RedoScope.DigestOnly)) = e.run(id, request, {}, { _, _ -> })
 
     @Test fun digestReplacesAndInheritsStarAndPreservesCompletedTodo() = runBlocking {
@@ -100,6 +100,25 @@ class Redo071Test {
         assertEquals(old, db.memory().event(1)); assertEquals("新原话", db.transcribe().exportSegments(listOf(1)).single().lines.single().text)
         assertTrue(e.undo("one").isSuccess)
         assertEquals("旧原话", db.transcribe().exportSegments(listOf(1)).single().lines.single().text)
+    }
+    @Test fun transcribeUndoRestoresBothIndependentVersions() = runBlocking {
+        seed()
+        val whole = db.wholeTranscripts()
+        whole.enqueue(1, 1)
+        val old = whole.get(1)!!
+        whole.claim(1, old.generation)
+        whole.complete(1, old.generation, "旧整体原话", 2)
+        val e = engine(onAfter = { segment, _ ->
+            whole.enqueue(segment.id, 3, replace = true)
+            val next = whole.get(segment.id)!!
+            whole.claim(segment.id, next.generation)
+            whole.complete(segment.id, next.generation, "新整体原话", 4)
+        })
+        run(e, request = RedoRequest(segmentIds = listOf(1), scope = RedoScope.TranscribeOnly))
+        assertEquals("新整体原话", whole.get(1)!!.text)
+        assertTrue(e.undo("one").isSuccess)
+        assertEquals("旧原话", db.transcribe().exportSegments(listOf(1)).single().lines.single().text)
+        assertEquals("旧整体原话", whole.get(1)!!.text)
     }
     @Test fun undoRestoresEventsItemsAndSecondRunInvalidatesFirst() = runBlocking {
         seed(); val e = engine(); run(e)

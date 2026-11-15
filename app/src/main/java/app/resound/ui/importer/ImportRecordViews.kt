@@ -125,6 +125,13 @@ fun ImportRecordSheet(id: Long, onOpenEvent: (MemoryEvent) -> Unit, onDismiss: (
             app.resound.ui.transcript.LinePlayer.play(context, lines, 0, app.resound.ui.transcript.PlaySource.Import(r.id))
         }
         if (r.segmentIds.isNotEmpty()) ActionButton("导出录音", ActionKind.Secondary) { exporting = true }
+        if (r.segmentIds.isNotEmpty()) {
+            Text("转录原文", style = RsType.caption, color = c.textTertiary)
+            app.resound.ui.transcript.TranscriptVersions(r.segmentIds) {
+                lines.forEach { Text(it.text, style = RsType.body, color = c.text) }
+                if (lines.isEmpty()) Text("切分版尚无结果", style = RsType.caption, color = c.textTertiary)
+            }
+        }
         // 整理出的事
         if (mine.isNotEmpty()) {
             Text("整理出的 ${mine.size} 件事", style = RsType.caption.copy(fontWeight = FontWeight.Medium), color = c.textTertiary)

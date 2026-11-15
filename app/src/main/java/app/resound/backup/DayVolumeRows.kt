@@ -18,6 +18,8 @@ internal object DayVolumeRows {
     val dated = linkedMapOf(
         "topics" to "createdAt", "topic_spans" to "startAt", "topic_marks" to "at",
         "import_records" to "startAt", "segments" to "startAt", "transcript_lines" to "startAt", "memory_events" to "startAt",
+        // 整体版按最后保存日分卷；恢复时与原录音一起做外键检查。
+        "whole_transcripts" to "updatedAt",
         "thing_records" to "at", "memory_items" to "createdAt", "skill_cards" to "at", "reviews" to "generatedAt",
         "ask_conversations" to "createdAt", "ask_messages" to "at",
         "asr_attempts" to "at", "asr_usage" to "day", "llm_usage_v2" to "day", "skill_runs" to "at",

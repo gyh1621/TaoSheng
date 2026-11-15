@@ -54,6 +54,7 @@ suspend fun queryModels(client: HttpClient, bases: List<String>, key: String, he
     error("服务没有提供模型列表，可手动填写模型名称")
 }
 fun customTranscriptionText(text: String): String {
+    requireCompleteCustomTranscript(text)
     val json = Obj(text)
     if (json.has("text")) return json.optString("text").trim()
     val code = json.optJSONObject("base_resp")?.optInt("status_code", 0) ?: 0

@@ -25,6 +25,7 @@ internal class RedoEngine(
     private val digest: suspend (List<TranscriptLineEntity>, String?) -> RedoDigest,
     /** 合并：按这几件事已整理好的结果写成一件（参数：旧事件、它们的原话、模型） */
     private val merge: suspend (List<MemoryEventEntity>, List<TranscriptLineEntity>, String?) -> RedoDigest = { _, _, _ -> RedoDigest(emptyList()) { emptyList() } },
+    private val afterTranscribe: suspend (SegmentEntity, TranscribeSource) -> Unit = { _, _ -> },
     private val identify: suspend (List<Long>) -> Unit = {},
     private val regenerate: suspend (List<SkillCardRow>, List<Pair<MemoryEventEntity, List<Long>>>, List<TranscriptLineEntity>) -> List<SkillCardRow> = { _, _, _ -> emptyList() },
     private val now: () -> Long = System::currentTimeMillis,
@@ -103,7 +104,10 @@ internal class RedoEngine(
         val refs = "SELECT id FROM transcript_lines WHERE segmentId IN (${s.segments.map { it.segment.id }.sqlIds()})"
         put("memory_items", "eventId IN (${s.events.map { it.id }.sqlIds()}) OR lineId IN ($refs) OR doneHintLineId IN ($refs)")
         put("transcript_lines", "segmentId IN (${s.segments.map { it.segment.id }.sqlIds()}) OR eventId IN (${s.events.map { it.id }.sqlIds()})")
-        if (scope.transcribes) put("segments", "id IN (${s.segments.map { it.segment.id }.sqlIds()})")
+        if (scope.transcribes) {
+            put("segments", "id IN (${s.segments.map { it.segment.id }.sqlIds()})")
+            put("whole_transcripts", "segmentId IN (${s.segments.map { it.segment.id }.sqlIds()})")
+        }
     }
 
     /** 合并的快照范围：旧事件、它们的条目、参与的原话行、这段时间的技能卡。 */
@@ -165,9 +169,11 @@ internal class RedoEngine(
                                 digestedAt = old?.digestedAt ?: now())
                         }
                         db.transcribe().completeRedo(db.transcribe().segment(segment.id).copy(status = if (lines.isEmpty()) "Empty" else "Done", completedAt = now(),
-                            error = null, nextRetryAt = null, firstFailedAt = null, voiceprintProcessedAt = if (segment.separateSpeakers == false) now() else null), lines, now())
+                            error = null, nextRetryAt = null, firstFailedAt = null, voiceprintProcessedAt = if (segment.separateSpeakers == false && !(segment.importChannel != null && segment.speakerCount != 0)) now() else null), lines, now())
                         saveAfter()
                     }
+                    afterTranscribe(segment, request.asr ?: chooser.lastChoice.value)
+                    db.writeTransaction { saveAfter() }
                 } catch (e: CancellationException) { throw e }
                 catch (e: AsrException) {
                     db.writeTransaction {

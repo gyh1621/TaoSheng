@@ -35,6 +35,9 @@ class TranscribeRunner(
     private val sharedPcm: SharedPcmFiles? = null,
     private val afterSegment: suspend (SegmentEntity) -> Unit = {},
     private val recordSpeed: (TranscribeSource?, Long, Long) -> Unit = { _, _, _ -> },
+    private val wholePrepare: suspend (SegmentEntity, TranscribeSource?) -> Unit = { _, _ -> },
+    private val wholeRun: suspend () -> Boolean = { false },
+    private val wholePending: suspend () -> Set<Long> = { emptySet() },
     private val topicTraining: suspend (Long) -> Boolean = { false },
 ) {
     suspend fun withIdleAudio(block: suspend () -> Unit) = gate.withLock { block() }
@@ -45,7 +48,7 @@ class TranscribeRunner(
         try {
             val timestamp = now()
             dao.recoverInterrupted(timestamp)
-            cleanupImportedAudio(dao, timestamp)
+            cleanupImportedAudio(dao, timestamp, wholePending())
         } finally { gate.unlock() }
     }
     /** true 表示仍有暂时错误，交 WorkManager 退避重试；鉴权失败立即结束本轮。 */
@@ -56,10 +59,14 @@ class TranscribeRunner(
             beginBatch()
             dao.recoverInterrupted(now())
             if (!deferAudioCleanup) cleanup()
-            else cleanupImportedAudio(dao, now())
+            else cleanupImportedAudio(dao, now(), wholePending())
             val started = now()
             val configuration = runCatching { identity() }.getOrDefault("")
-            if (!ready() && dao.candidates(now()).none { it.asrSource != null }) { updateState(started, "转写未就绪，请配置服务或下载本地模型"); return false }
+            if (!ready() && dao.candidates(now()).none { it.asrSource != null }) {
+                updateState(started, "转写未就绪，请配置服务或下载本地模型")
+                // 整体版使用独立的 Custom 就绪条件；全局 Local 未下载不能卡住已完成 A 的 B 重试。
+                return wholeRun()
+            }
             updateState(started, null)
             val candidates = dao.candidates(now())
             var done = 0
@@ -92,6 +99,7 @@ class TranscribeRunner(
                         outcome = "SkippedEnv"
                         return RoundDecision.Continue
                     }
+                    wholePrepare(candidate, selected)
                     val training = topicTraining(candidate.startAt)
                     val distinguish = if (training) false else candidate.separateSpeakers ?: separateSpeakers(candidate.startAt)
                     if (training) dao.topicTraining(candidate.id)
@@ -102,7 +110,7 @@ class TranscribeRunner(
                         reserved = (candidate.endAt - candidate.startAt).coerceAtLeast(0)
                         dao.reserveAudio(today(), reserved, candidate.id)
                     }
-                    val result = if (selected == TranscribeSource.Local) heavy.withLock { recognize() } else recognize()
+                    val result = if (selected == TranscribeSource.Local || selected == TranscribeSource.Custom) heavy.withLock { recognize() } else recognize()
                     recordSpeed(selected, (candidate.endAt - candidate.startAt).coerceAtLeast(0), (now() - began).coerceAtLeast(1))
                     logId = TranscribePolicy.safeLogId(result.logId, credential)
                     outcome = if (result.sentences.isEmpty()) "Empty" else "Done"
@@ -153,7 +161,7 @@ class TranscribeRunner(
                 if (candidate.sourceId == "import" && outcome in setOf("Done", "Empty")) {
                     // 声纹失败不应把成功的转写改回失败；音频留待重试或三天上限清理。
                     try { heavy.withLock { afterImport() } } catch (e: CancellationException) { throw e } catch (_: Exception) { }
-                    if (!deferAudioCleanup) cleanupImportedAudio(dao, now())
+                    if (!deferAudioCleanup) cleanupImportedAudio(dao, now(), wholePending())
                 }
                 if (error == AsrError.Auth) return RoundDecision.Stop
                 if (error in TranscribePolicy.ROUND_STOPPERS) return RoundDecision.Retry
@@ -174,7 +182,7 @@ class TranscribeRunner(
                 if (RoundDecision.Retry in decisions) return true
                 index += count
             }
-            return dao.earliestRetry() != null
+            return wholeRun() || dao.earliestRetry() != null
         } finally {
             try { sharedPcm?.clear(); endBatch(); updateProgress(0, 0) } finally { gate.unlock(); if (producedLines) afterRound() }
         }
@@ -182,9 +190,9 @@ class TranscribeRunner(
     private enum class RoundDecision { Continue, Stop, Retry }
     private suspend fun cleanup() {
         val timestamp = now()
-        cleanupImportedAudio(dao, timestamp)
+        cleanupImportedAudio(dao, timestamp, wholePending())
         for (segment in dao.expired(timestamp - TranscribePolicy.RETENTION_MILLIS)) {
-            if (TranscribePolicy.canDelete(segment.status, segment.completedAt, timestamp)) File(segment.path).delete()
+            if (segment.id !in wholePending() && TranscribePolicy.canDelete(segment.status, segment.completedAt, timestamp)) File(segment.path).delete()
         }
     }
     suspend fun test(audio: AsrAudio, credential: String): Result<String> = gate.withLock {

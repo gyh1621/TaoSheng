@@ -35,7 +35,7 @@ internal class ImportSummary(
     private val now: () -> Long = System::currentTimeMillis,
     private val session: TopicProcessingSession? = null,
 ) {
-    suspend fun generate(record: ImportRecordRow, lines: List<TranscriptLineEntity>, existing: List<app.resound.data.MemoryItemEntity> = emptyList(), extraContext: String = ""): ImportSummaryResult {
+    suspend fun generate(record: ImportRecordRow, lines: List<TranscriptLineEntity>, existing: List<app.resound.data.MemoryItemEntity> = emptyList(), extraContext: String = "", wholeRows: List<app.resound.data.WholeTranscript> = emptyList()): ImportSummaryResult {
         val (skill, instructions) = template(ImportKind.valueOf(record.kind))
         val date = Instant.ofEpochMilli(record.startAt).atZone(SKILL_ZONE).toLocalDate()
         val indexed = lines.associateBy { "L${it.id}" }
@@ -91,9 +91,9 @@ internal class ImportSummary(
                 val text = buildString {
                     appendLine("文件：${record.fileName}；第 ${i + 1}/${chunks.size} 块；范围 ${SkillInputs.time(part.first().startAt)}～${SkillInputs.time(part.maxOf { it.endAt })}")
                     previous?.let { appendLine("上一块末句（仅供衔接，不重复行动）：[L${it.id}] ${SkillInputs.speaker(it)}：${it.text}") }
-                    part.forEach { appendLine("[L${it.id}] ${SkillInputs.time(it.startAt)} ${SkillInputs.speaker(it)}：${it.text}") }
+                    part.forEachIndexed { index, it -> appendLine("第 ${index + 1} 句 [L${it.id}] ${SkillInputs.time(it.startAt)} ${SkillInputs.speaker(it)}：${it.text}") }
                 }
-                ask(text)
+                ask(wholeDigestText(text, part, wholeRows.filter { row -> part.any { it.segmentId == row.segmentId } }))
             }
             leaves += session?.splitRead(chunk, read) ?: listOf(read(chunk))
             session?.advance()
