@@ -15,12 +15,6 @@ import app.resound.transcribe.TranscriptRepository
 object AppGraph {
     lateinit var wholeTranscripts: app.resound.data.WholeTranscriptDao
     val isWholeTranscriptsReady: Boolean get() = ::wholeTranscripts.isInitialized
-    /** 启动时从平台 KeyValueStore 读取一次；修改后重启生效。 */
-    internal var legacyNetwork: Boolean = false
-        private set
-    internal fun configureNetwork(store: app.resound.platform.KeyValueStore) {
-        legacyNetwork = store.getBoolean("net.legacy_okhttp", false)
-    }
 
     lateinit var platform: app.resound.platform.PlatformServices
     val isPlatformReady: Boolean get() = ::platform.isInitialized

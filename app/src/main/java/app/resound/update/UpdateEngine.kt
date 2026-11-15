@@ -1,5 +1,7 @@
 package app.resound.update
 
+import app.resound.diagnostics.FailureNotes
+
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +46,8 @@ internal class UpdateEngine(
     private val now: () -> Long = System::currentTimeMillis,
     private val reschedule: (Boolean, Boolean) -> Unit = { _, _ -> },
 ) : AppUpdater {
+    private val forkBuild = "-custom-asr." in currentVersion
+    private val forkUpdateNotice = "这是自编版本，请从维护者提供的 Drive 链接更新；不能安装官方版本以免丢失自定义功能。"
     private val gate = Mutex()
     private val mutable = MutableStateFlow<UpdateState>(UpdateState.Idle)
     override val state = mutable.asStateFlow()
@@ -61,7 +65,7 @@ internal class UpdateEngine(
         preview.value = enabled
         reschedule(auto.value, enabled)
         scope.launch(Dispatchers.IO) {
-            gate.withLock { restore(); discardDisabledPreview() }
+            gate.withLock { if (!blockOfficialUpdate(false)) { restore(); discardDisabledPreview() } }
             if (enabled) checkNow()
         }
     }
@@ -82,6 +86,7 @@ internal class UpdateEngine(
     override fun check(manual: Boolean) { scope.launch { checkNow(manual) } }
     suspend fun checkNow(manual: Boolean = false, startup: Boolean = false) = withContext(Dispatchers.IO) {
         gate.withLock {
+            if (blockOfficialUpdate(manual)) return@withLock
             restore()
             discardDisabledPreview()
             if (mutable.value is UpdateState.Installing) return@withLock
@@ -124,12 +129,24 @@ internal class UpdateEngine(
         }
     }
 
+    private fun blockOfficialUpdate(manual: Boolean): Boolean {
+        if (!forkBuild) return false
+        manifest = null; patch = null
+        store.save("manifest" to null, "ready" to null, "manifestPreview" to null)
+        platform.dismissNotification()
+        mutable.value = if (manual) UpdateState.Failed(forkUpdateNotice, null) else UpdateState.Idle
+        return true
+    }
+
     /** 进程重启只恢复状态，不会恢复自动下载或自动安装。 */
     private fun restore() {
         if (restored) return
         kotlin.check(directory.isDirectory || directory.mkdirs())
         val seen = store.long("installedVersion")
-        val saved = store.string("manifest")?.let { runCatching { UpdateManifest.parse(it).let { release -> release.copy(previewSource = store.long("manifestPreview") == 1L || release.preview) } }.getOrNull() }
+        val saved = store.string("manifest")?.let { runCatching { UpdateManifest.parse(it).let { release -> release.copy(previewSource = store.long(
+            "manifestPreview") == 1L || release.preview) } }.onFailure {
+                FailureNotes.record("update/UpdateEngine.kt:132", it)
+            }.getOrNull() }
         if ((seen > 0 && seen != versionCode) || (saved != null && !saved.newerThan(versionCode))) {
             directory.listFiles()?.forEach { kotlin.check(it.deleteRecursively()) }
             store.save("manifest" to null, "ready" to null, "session" to null, "installedHash" to null)
@@ -168,6 +185,7 @@ internal class UpdateEngine(
 
     override fun download() { scope.launch(Dispatchers.IO) {
         gate.withLock {
+            if (blockOfficialUpdate(true)) return@withLock
             restore()
             discardDisabledPreview()
             if (manifest == null || mutable.value is UpdateState.Ready || mutable.value is UpdateState.Installing) return@withLock
@@ -263,6 +281,7 @@ internal class UpdateEngine(
         val waited = preBackupRunning && mutable.value is UpdateState.Ready
         if (waited) mutable.value = UpdateState.Installing(info(), true, "正在保存本机数据", 0f)
         gate.withLock {
+            if (blockOfficialUpdate(true)) return@withLock
             restore()
             discardDisabledPreview()
             if (manifest == null || (mutable.value is UpdateState.Installing && !waited) || store.string("ready") != manifest!!.apk.sha256) {

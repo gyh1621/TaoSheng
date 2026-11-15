@@ -47,6 +47,25 @@ class WholeTranscriptStoreTest {
             assertEquals("Pending", db.wholeTranscripts().get(id)!!.status)
         } finally { db.close(); folder.deleteRecursively() }
     }
+    @Test fun wholeOnlyPendingRemainsSchedulableUntilRetryBudgetExhausted() = runBlocking(Dispatchers.IO) {
+        val db = memory()
+        try {
+            add(db)
+            val dao = db.wholeTranscripts()
+            dao.enqueue(1, 1)
+            assertEquals(0L, db.transcribe().pendingMillis())
+            assertEquals(1000L, dao.runnableMillis())
+            val generation = dao.get(1)!!.generation
+            repeat(3) { attempt ->
+                dao.claim(1, generation)
+                assertEquals(1000L, dao.runnableMillis())
+                dao.fail(1, generation, "失败", 2)
+                assertEquals(if (attempt < 2) 1000L else 0L, dao.runnableMillis())
+            }
+            assertEquals(listOf(1L), dao.pendingIds()) // 原音频仍受保护，直到用户决策。
+        } finally { db.close() }
+    }
+
     @Test fun forgetAndDeleteRejectLateNetworkCompletion() = runBlocking(Dispatchers.IO) {
         val db = memory()
         try {

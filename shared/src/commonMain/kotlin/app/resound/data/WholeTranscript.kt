@@ -30,6 +30,10 @@ abstract class WholeTranscriptDao {
     abstract suspend fun getMany(ids: List<Long>): List<WholeTranscript>
     @Query("SELECT * FROM whole_transcripts WHERE status = 'Pending' OR (status = 'Failed' AND attempts < 3) ORDER BY segmentId")
     abstract suspend fun pending(): List<WholeTranscript>
+    @Query("SELECT COALESCE(SUM(MAX(1, s.endAt - s.startAt)),0) FROM whole_transcripts w JOIN segments s ON s.id=w.segmentId WHERE w.status IN ('Pending','Running') OR (w.status='Failed' AND w.attempts<3)")
+    abstract fun observeRunnableMillis(): Flow<Long>
+    @Query("SELECT COALESCE(SUM(MAX(1, s.endAt - s.startAt)),0) FROM whole_transcripts w JOIN segments s ON s.id=w.segmentId WHERE w.status IN ('Pending','Running') OR (w.status='Failed' AND w.attempts<3)")
+    abstract suspend fun runnableMillis(): Long
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun put(row: WholeTranscript)
     @Query("SELECT EXISTS(SELECT 1 FROM segments WHERE id = :id)")

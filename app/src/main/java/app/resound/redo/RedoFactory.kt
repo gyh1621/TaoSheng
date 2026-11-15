@@ -1,5 +1,8 @@
 package app.resound.redo
 
+import app.resound.context.SituationLookup
+import app.resound.update.UpdateDiagnostics
+
 import android.content.Context
 import app.resound.appName
 import app.resound.data.*
@@ -18,7 +21,7 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
     hotwords: () -> List<String>, template: () -> String, mergeTemplate: () -> String,
     identify: suspend (List<Long>) -> Unit,
     network: (TranscribeSource) -> Boolean,
-    situation: app.resound.context.SituationLookup? = null,
+    situation: SituationLookup? = null,
 ): RedoEngine {
     val provider = ConfiguredAsrProvider(context, settings, hotwords)
     val whole = WholeTranscribeRunner(db.wholeTranscripts(), db.transcribe(), CustomAsrProvider(settings, hotwords),
@@ -84,7 +87,8 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
         }
         val indexed = lines.sortedBy { it.startAt }
         val contextPrompt = SituationPrompt(digestSettings.includeSituation.value, situation)
-        val reply = digestSettings.failover.request("合并事件", db.memory(), app.resound.usage.UsagePurpose.Digest, digestSettings.digestRequest(llm))(preset, key, contextPrompt.system(MergePrompt.system(mergeTemplate(), LocalDate.now(), context.appName)), contextPrompt.merge(events))
+        val reply = digestSettings.failover.request("合并事件", db.memory(), UsagePurpose.Digest, digestSettings.digestRequest(llm))(preset, key, contextPrompt.system(
+            MergePrompt.system(mergeTemplate(), LocalDate.now(), context.appName)), contextPrompt.merge(events))
         withContext(NonCancellable) { db.memory().addUsage(LocalDate.now().toString(), reply.promptTokens, reply.completionTokens, UsagePurpose.Digest) }
         val (event, items) = MergePrompt.parse(reply.content, indexed)
         val at = System.currentTimeMillis()
@@ -106,23 +110,25 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
             val gateLines = SkillInputs.gateLines(raw.map { it.snapshot() }, skill.scope.speakers)
             val gateFailure = SkillGateRules.failure(skill.gate, gateLines)
             if (gateFailure != null) {
-                app.resound.update.UpdateDiagnostics.record(context, "重做技能 ${skill.id}：$gateFailure")
+                UpdateDiagnostics.record(context, "重做技能 ${skill.id}：$gateFailure")
                 return@flatMap emptyList()
             }
             val bounded = SkillInputs.boundedLines(raw, skill.scope.speakers)
             val indexed = bounded.mapIndexed { i, l -> "L${i + 1}" to l }.toMap()
             val input = SkillInput(buildString {
                 appendLine("归属日期：$date；以下是这段时间重新整理后的事件：")
-                events.filter { it.first.startAt < end && it.first.endAt > start }.forEach { (e, _) -> appendLine("${SkillInputs.time(e.startAt)}～${SkillInputs.time(e.endAt)} ${e.title}：${e.summary}") }
+                events.filter { it.first.startAt < end && it.first.endAt > start }.forEach { (e, _) -> appendLine("${SkillInputs.time(e.startAt)}～${SkillInputs.time(e
+                    .endAt)} ${e.title}：${e.summary}") }
                 appendLine("原话：")
                 indexed.forEach { (id, l) -> appendLine("[$id] ${SkillInputs.time(l.startAt)} ${SkillInputs.speaker(l)}：${l.text}") }
             }, indexed)
             val (preset, key) = digestSettings.skillCredentials(skill.presetId)
-            val reply = digestSettings.failover.request("重做技能", db.memory(), app.resound.usage.UsagePurpose.Skill, llm::chatJson)(preset, key, SkillPrompt.system(skill, files.prompt(skill.id), date), SkillInputs.user(input, hotwords()))
+            val reply = digestSettings.failover.request("重做技能", db.memory(), UsagePurpose.Skill, llm::chatJson)(preset, key, SkillPrompt.system(skill, files.prompt(skill
+                .id), date), SkillInputs.user(input, hotwords()))
             withContext(NonCancellable) { db.memory().addUsage(LocalDate.now().toString(), reply.promptTokens, reply.completionTokens, UsagePurpose.Skill) }
             val rows = SkillOutput.parse(reply.content, skill, date, input, System.currentTimeMillis(), false).rows
             val accepted = rows.filter { SkillGateRules.cardFailure(skill.gate, gateLines, it.at, it.endAt) == null }
-            if (accepted.size < rows.size) app.resound.update.UpdateDiagnostics.record(context,
+            if (accepted.size < rows.size) UpdateDiagnostics.record(context,
                 "重做技能 ${skill.id}：门槛复核丢弃 ${rows.size - accepted.size} 张")
             accepted.take(skill.maxCardsPerDay)
         }
