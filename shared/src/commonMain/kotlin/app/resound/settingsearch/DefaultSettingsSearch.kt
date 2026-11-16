@@ -33,10 +33,12 @@ internal object SettingsIndex {
         }
         page("Capture", "录音与后台", "收音 听声音 麦克风 录音设置") {
             item("后台保活", "battery", "耗电 电池 省电 被杀 中断 后台")
+            item("语音助手唤醒", "wake-word", "小爱同学 唤醒词 语音助手 喊不醒")
+            item("打点记一下", "marks", "打点 标记重点 记一下 重点范围")
             item("录音权限", "permissions", "授权 麦克风权限 通知权限 录不了")
             item("免打扰时段", "quiet", "不录 静音 睡觉 午休 勿扰 停录时段")
             item("暂停时长", "pause-length", "暂停多久 半小时 一小时 两小时")
-            item("录音输入", "input", "手机麦克风 蓝牙耳机 领夹麦 Type-C 切换麦克风")
+            item("录音输入", "input", "手机麦克风 蓝牙耳机 领夹麦 大疆 Type-C 看视频没声音")
             item("语音输入记录", "voice-input", "输入法 无障碍 微信打字 口述")
             item("外放跳过", "playback", "听歌 看视频 扬声器 外放不录")
             item("文件夹导入", "folder-import", "自动导入 扫描文件夹 导入录音 外部录音")
@@ -49,6 +51,7 @@ internal object SettingsIndex {
             item("热词识别", "hotwords", "热词 纠错 错字 人名 术语")
             item("原声保留", "audio-retention", "录音保留 音频删除 存多久 空间")
             item("区分说话人", "speakers", "多人分段 谁说的 分人 说话人")
+            item("记录播放标题", "playback-title", "播放标题 节目名 通知使用权 外放来源")
         }
         page("EnvSound", "环境音识别", "背景声音 声音分类 环境识别") {
             item("开启环境音识别", "env-enabled", "环境模型 环境开关 声音模型")
@@ -63,6 +66,12 @@ internal object SettingsIndex {
             item("定位权限", "location-permission", "始终允许 后台定位 授权位置")
             item("显示地名", "place-names", "高德 地址 地理编码 地名")
             item("常去地点", "places", "家 公司 地点名称 停留")
+        }
+        page("ScreenTime", "屏幕时间", "手机使用 App 用时 玩手机 使用时长") {
+            item("记录屏幕时间", "screen-time-enabled", "使用情况访问 采集开关 授权")
+            item("整理时带上 App 与播放信息", "include-app-playback", "节目名 播放标题 隐私 大模型")
+            item("首页显示屏幕用时", "screen-time-home", "首页 节奏图 手机使用条")
+            item("事件上显示当时在用", "screen-time-event", "当时在用 事件 App")
         }
         page("Devices", "外接设备", "录音卡 硬件 外设 蓝牙设备") {
             item("扫描设备", "device-scan", "找设备 连接 配对 蓝牙扫描")
@@ -121,6 +130,7 @@ internal object SettingsIndex {
         page("Update", "版本更新", "升级 新版本 下载更新") {
             item("检查更新", "check-update", "最新版 检查版本 手动更新")
             item("自动检查更新", "auto-update", "自动升级 更新开关 后台检查")
+            item("更新日志", "changelog", "更新记录 版本历史 更新了什么 新功能")
             item("跳过这个版本", "skip-version", "暂不更新 忽略版本 不升级")
         }
         page("About", "关于涛声", "关于 版本信息 帮助") {

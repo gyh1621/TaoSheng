@@ -92,7 +92,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -230,6 +229,11 @@ fun TodayScreen(
     var deleteError by remember { mutableStateOf<String?>(null) }
     var deleteProgress by remember { mutableStateOf<Int?>(null) }
 
+    // 屏幕时间：首页显示时读这一天的数据，录音卡、节奏图和事件“当时在用”共用一份
+    val screenHome = app.resound.AppGraph.isScreenTimeReady && app.resound.AppGraph.screenTimeSettings.showOnHome.collectAsStateWithLifecycle().value
+    val screenDay = app.resound.ui.screentime.rememberScreenDay(date, active = screenHome)
+    var screenOpen by remember { mutableStateOf(false) }
+    if (screenOpen) app.resound.ui.screentime.ScreenTimeSheet(date, memory, onOpenEvent = { screenOpen = false; opened = it }) { screenOpen = false }
     var boxTop by remember { mutableStateOf(0f) }
     val rhythmShown = remember(list, dayLines) { dayRhythm(list, dayLines) != null }
     // 时间线标题那一格在列表里的位置（前面几格按是否显示来数），节奏卡片点数字/柱子时滚到这里
@@ -243,6 +247,7 @@ fun TodayScreen(
     var searching by remember { mutableStateOf(false) }
     if (searching && recordSearch != null) RecordSearchSheet(recordSearch) { searching = false }
     Box(Modifier.fillMaxSize().background(c.background).onGloballyPositioned { boxTop = it.boundsInRoot().top }) {
+    androidx.compose.runtime.CompositionLocalProvider(app.resound.ui.screentime.LocalScreenDay provides screenDay) {
     LazyColumn(
         Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
             .onGloballyPositioned { viewport = it.boundsInRoot() },
@@ -258,6 +263,11 @@ fun TodayScreen(
                     app.resound.ui.settings.CrashNotice(topGap = 20.dp)
                     UpdatePrompt(topGap = 16.dp)
                     BackgroundLimitNotice(topGap = 12.dp)
+                    val captureStatus by capture.status.collectAsStateWithLifecycle()
+                    WakeWordNotice(captureStatus.state == CaptureState.Listening || captureStatus.state == CaptureState.Recording, topGap = 12.dp)
+                    WhatsNewNotice(topGap = 12.dp)
+                    RemoteNoticeCards(topGap = 12.dp)
+                    ScreenTimePermissionNotice(topGap = 12.dp)
                     // 首次使用：几步设置的清单，做完或关掉就不再出现；只在看今天时显示
                     StartChecklist(capture, hasKey, topGap = 20.dp)
                     app.resound.ui.onboarding.OnboardingTipCard(topGap = 12.dp)
@@ -268,10 +278,11 @@ fun TodayScreen(
             OverviewCard(capture, memory, transcripts, hasKey, speechMillis = day?.speechMillis, eventCount = events?.size, pendingCount = pendingCount,
                 pastDate = if (dayOffset == 0) null else date,
                 onPending = { rhythmScope.launch { listState.animateScrollToItem(pendingIndex()) } },
-                onPaused = { pausedNote = it to System.nanoTime() })
+                onPaused = { pausedNote = it to System.nanoTime() },
+                screenMinutes = screenDay?.totalMinutes, onScreen = { screenOpen = true })
         }
         if (rhythmShown) item(key = "rhythm") {
-            RhythmCard(list, dayLines, date, transcribeQueue.pending,
+            RhythmCard(list, dayLines, date, transcribeQueue.pending, screenByHour = screenDay?.byHour,
                 onFilter = { f -> filter = f; rhythmScope.launch { listState.animateScrollToItem(timelineIndex()) } },
                 onHour = { h ->
                     // 跳到这个小时所在的时段：先回到全部，再滚到那一组
@@ -329,6 +340,7 @@ fun TodayScreen(
             TimelineGroup(part, evs, Modifier.animateItem(), onOpenCard = { openedCard = it }, onOpenImport = { openedImport = it.id },
                 onStar = { memory.setStarred(it.id, !it.starred) }, onDelete = { deleteNow(it) }, selection = selection, order = order) { opened = it }
         }
+    }
     }
     val chosen = list.filter { it.id in selection.ids }
     app.resound.ui.ScrollToTopOnReselect(listState)
@@ -711,30 +723,6 @@ internal fun friendlyDue(at: Long, text: String?): String {
 
 // ---------- 时间线 ----------
 
-@Composable
-private fun EmptyTimeline(memory: MemoryRepository) {
-    val c = Rs.colors
-    val digest by memory.state.collectAsStateWithLifecycle()
-    RsCard(padding = PaddingValues(vertical = 32.dp, horizontal = 20.dp)) {
-        Text(
-            if (digest.pendingLines > 0) "有 ${digest.pendingLines} 句原话等着整理" else "这一天还没有整理出事件",
-            style = RsType.subhead,
-            color = c.textSecondary,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "录到人声 → 转写成原话 → 说完约 10 分钟后整理成一件件事",
-            style = RsType.caption,
-            color = c.textTertiary,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center,
-        )
-    }
-}
-
-
 internal fun partOfDay(at: Long): String = when (Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()).hour) {
     in 0..5 -> "凌晨"
     in 6..11 -> "上午"
@@ -790,7 +778,7 @@ internal fun TimelineGroup(part: String, entries: List<TimelineEntry>, modifier:
                             retry = { app.resound.ui.topic.TopicUi.openTopic = e.topic.id }, retryLabel = "查看进度")
                     }
                     is TimelineEntry.Card -> CardHintLine(e.card) { onOpenCard(e.card) }
-                    is TimelineEntry.Import -> app.resound.ui.importer.ImportLine(e.record, e.events.size) { onOpenImport(e.record) }
+                    is TimelineEntry.Import -> app.resound.ui.importer.ImportLine(e.record, e.events) { onOpenImport(e.record) }
                 }
                 if (i != entries.lastIndex) Box(Modifier.padding(start = 76.dp, end = 18.dp).fillMaxWidth().height(0.5.dp).background(c.separator))
             }
@@ -856,7 +844,13 @@ internal fun TimelineLine(event: MemoryEvent, onLongPress: (() -> Unit)? = null,
         )
         Column(Modifier.weight(1f).alpha(dim)) {
             val counts = event.items.groupingBy { it.category }.eachCount()
+            // 卡 195：这件事和你打的点重叠就标一个📍（按时间重叠算，打点后马上出现）
+            val marked by remember(event.id, event.startAt, event.endAt) {
+                if (app.resound.AppGraph.isMarksReady) app.resound.AppGraph.marks.observeDay(event.startAt, event.endAt)
+                else kotlinx.coroutines.flow.flowOf(emptyList())
+            }.collectAsStateWithLifecycle(initialValue = emptyList())
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (marked.isNotEmpty()) { Text("📍", style = RsType.caption); Spacer(Modifier.width(4.dp)) }
                 Text(event.title, style = RsType.body.copy(fontWeight = FontWeight.SemiBold), color = c.text, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 // ★ 只给你亲手标的重点；大模型判断的“要紧”用浅色小字，只作参考
@@ -881,7 +875,23 @@ internal fun TimelineLine(event: MemoryEvent, onLongPress: (() -> Unit)? = null,
             Text(event.summary, style = RsType.caption.copy(lineHeight = 18.sp), color = c.textSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
             app.resound.ui.context.EventPlaceLine(event, Modifier.padding(top = 3.dp))
             app.resound.ui.envsound.EventEnvLine(event, Modifier.padding(top = 3.dp))
+            EventInUseLine(event)
         }
+    }
+}
+
+/** 这件事发生时用得最久的 App：“● 当时在用 微信 6 分”。只在首页那一天的屏幕时间已读出、且没关这一项时显示。 */
+@Composable
+private fun EventInUseLine(event: MemoryEvent) {
+    val day = app.resound.ui.screentime.LocalScreenDay.current ?: return
+    if (!app.resound.AppGraph.isScreenTimeReady) return
+    val on by app.resound.AppGraph.screenTimeSettings.eventInUse.collectAsStateWithLifecycle()
+    if (!on) return
+    val use = remember(day, event.startAt, event.endAt) { app.resound.screentime.ScreenTimeView.inUse(day.sessions, event.startAt, event.endAt) } ?: return
+    val c = Rs.colors
+    Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(6.dp).clip(androidx.compose.foundation.shape.CircleShape).background(phoneTint(c)))
+        Text("  当时在用 ${use.name} ${use.minutes} 分", style = RsType.caption, color = c.textTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1260,6 +1270,14 @@ internal fun ItemSheet(opened: MemoryItem, memory: MemoryRepository, onOpenEvent
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ActionChip("接受", ChipTone.Accent, Modifier.weight(1f)) { memory.setItemStatus(item.id, ItemStatus.Accepted); onClose() }
                     ActionChip("忽略", ChipTone.Plain, Modifier.weight(1f)) { memory.setItemStatus(item.id, ItemStatus.Ignored); onClose() }
+                }
+                Spacer(Modifier.height(10.dp))
+            }
+            // 加到手机日历：打开系统日历的新建日程，填好标题、时间、备注；没定日子的先选日子
+            if (task && item.status != ItemStatus.Ignored) {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                ActionChip(if (item.dueAt != null) "📅 加到手机日历" else "📅 选日子后加到手机日历", ChipTone.AccentSoft, Modifier.fillMaxWidth()) {
+                    app.resound.ui.items.SystemCalendar.add(ctx, item)
                 }
                 Spacer(Modifier.height(10.dp))
             }

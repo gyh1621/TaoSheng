@@ -95,6 +95,10 @@ data class PushSubscription(
     val footprint: Boolean = false,
     /** 每天几点推足迹（一天里的分钟数） */
     val footprintAt: Int = 22 * 60,
+    /** 每日屏幕时间：默认不推 */
+    val screenTime: Boolean = false,
+    /** 每天几点推屏幕时间（一天里的分钟数） */
+    val screenTimeAt: Int = 22 * 60,
 ) {
     companion object {
         /** 一键模板：选了再细调 */
@@ -191,6 +195,9 @@ interface PushChannels {
 
     /** 发一条测试消息；成功返回给人看的一句话 */
     suspend fun test(id: Long): Result<String>
+
+    /** 同步文件夹“复制给智能体”的那段话（含应用密码）；不是 WebDAV 文件夹时为 null */
+    suspend fun agentPrompt(id: Long): String? = null
 
     /** 最近的推送记录（新的在前） */
     fun logs(limit: Int = 50): Flow<List<PushLog>>
