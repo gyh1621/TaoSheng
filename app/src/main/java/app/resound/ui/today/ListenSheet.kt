@@ -95,7 +95,7 @@ fun ListenSheet(capture: CaptureController, startOnForget: Boolean = false, onDi
         if (AppGraph.isTopicsReady) {
             Spacer(Modifier.height(10.dp))
             Box(Modifier.fillMaxWidth().padding(vertical = 2.dp).height(0.5.dp).background(c.separator))
-            app.resound.ui.topic.TopicSection(onDismiss, if (AppGraph.isQuickPrefsReady) AppGraph.quickPrefs.lastTopicKind.value else app.resound.topic.TopicKind.Meeting)
+            app.resound.ui.topic.TopicSection(onDismiss, if (AppGraph.isQuickPrefsReady) AppGraph.quickPrefs.lastTopicKind.collectAsStateWithLifecycle().value else app.resound.topic.TopicKind.Meeting)
         }
 
         if (AppGraph.isPrivacyReady) {

@@ -74,6 +74,9 @@ object AppGraph {
     val isRedoReady: Boolean get() = ::redo.isInitialized
 
     // 卡 070：环境音识别
+    lateinit var nightInsights: app.resound.night.NightInsights
+    lateinit var night: app.resound.night.NightRepository
+    val isNightReady: Boolean get() = ::night.isInitialized
     lateinit var envSound: app.resound.envsound.EnvSoundRepository
     val isEnvSoundReady: Boolean get() = ::envSound.isInitialized
     /** 足迹（全天定位） */
@@ -139,10 +142,12 @@ object AppGraph {
     lateinit var digestProgress: kotlinx.coroutines.flow.StateFlow<app.resound.digest.DigestProgress>
     val isDigestProgressReady: Boolean get() = ::digestProgress.isInitialized
 
-    lateinit var playbackSkip: app.resound.capture.PlaybackSkipSettings
-    val isPlaybackSkipReady: Boolean get() = ::playbackSkip.isInitialized
-    lateinit var playbackDigestSettings: app.resound.transcribe.PlaybackDigestSettings
-    val isPlaybackDigestReady: Boolean get() = ::playbackDigestSettings.isInitialized
+    lateinit var playbackSentences: app.resound.transcribe.PlaybackSentences
+    lateinit var playbackSettings: app.resound.transcribe.PlaybackSettings
+    lateinit var playbackSkip: app.resound.capture.LegacyPlaybackControls
+    val playbackDigestSettings get() = playbackSkip
+    val isPlaybackSkipReady get() = ::playbackSkip.isInitialized
+    val isPlaybackDigestReady get() = isPlaybackSkipReady
 
     /** 播放状态（是否在放、是否可能外放）应用级单例；有订阅者才注册系统回调。 */
     lateinit var playback: app.resound.capture.PlaybackMonitor
@@ -160,6 +165,8 @@ object AppGraph {
     lateinit var importKinds: app.resound.importer.ImportKinds
     val isImportKindsReady: Boolean get() = ::importKinds.isInitialized
     lateinit var folderImports: app.resound.importer.FolderImports
+    lateinit var folderRecordings: app.resound.importer.FolderRecordings
+    val isCallRecordingReady: Boolean get() = ::folderRecordings.isInitialized
     val isFolderImportReady: Boolean get() = ::folderImports.isInitialized
     lateinit var importer: app.resound.importer.AudioImporter
     val isImporterReady: Boolean get() = ::importer.isInitialized

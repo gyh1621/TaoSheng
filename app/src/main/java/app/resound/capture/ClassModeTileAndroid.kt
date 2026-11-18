@@ -52,6 +52,8 @@ class ClassModeTileService : TileService() {
             updateTile()
         }
     }
+    // PendingIntent 重载从 API 34 才可用；旧重载仅在低版本分支调用。
+    @android.annotation.SuppressLint("StartActivityAndCollapseDeprecated")
     override fun onClick() {
         super.onClick()
         if (!AppGraph.isTopicsReady) return

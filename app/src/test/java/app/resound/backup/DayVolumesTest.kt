@@ -132,6 +132,10 @@ class DayVolumesTest {
         val generation = whole.get(91)!!.generation
         assertEquals(1, whole.claim(91, generation))
         assertEquals(1, whole.complete(91, generation, "整体版保留完整上下文", now))
+        val nightId = db.night().insert(app.resound.night.NightRow(date = "2026-10-24", start = now, end = now + 1000,
+            state = "Ready", payload = "{}", signals = "{}", createdAt = now, updatedAt = now))
+        db.testSql.execSQL("INSERT INTO night_tags(id,name,preset) VALUES(9,'合成睡眠标签',0)")
+        db.testSql.execSQL("INSERT INTO night_tag_links(nightId,tagId,state) VALUES(?,9,'Yes')", arrayOf(nightId))
         sync()
         val room = CaptureDatabase.open(context, File(restore(), BackupArchive.DATABASE).path)
         try {
@@ -140,6 +144,9 @@ class DayVolumesTest {
             assertEquals("Done", restored.status)
             assertEquals(generation, restored.generation)
             assertNotNull(room.transcribe().findSegment(91))
+            assertEquals("Ready", room.night().get(nightId)!!.state)
+            room.testSql.query("SELECT name FROM night_tags WHERE id=9").use { assertTrue(it.moveToFirst()); assertEquals("合成睡眠标签", it.getString(0)) }
+            room.testSql.query("SELECT nightId FROM night_tag_links WHERE tagId=9").use { assertTrue(it.moveToFirst()); assertEquals(nightId, it.getLong(0)) }
             room.testSql.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
         } finally { room.close() }
     }

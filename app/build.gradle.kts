@@ -13,11 +13,18 @@ android {
 
     defaultConfig {
         applicationId = if (project.hasProperty("localAsrValidation")) "app.resound.validation" else "app.resound"
+        // 使用 Room 导出的当前实体名，失效统计随 schema 自动更新。
+        val schema = rootProject.file("shared/schemas/app.resound.data.CaptureDatabase").listFiles()!!
+            .filter { it.extension == "json" }.maxBy { it.nameWithoutExtension.toInt() }
+        val tables = Regex(""""tableName"\s*:\s*"([a-zA-Z0-9_]+)"""")
+            .findAll(providers.fileContents(layout.projectDirectory.file(schema.relativeTo(projectDir).path)).asText.get())
+            .map { it.groupValues[1] }.distinct().joinToString(",")
+        resValue("string", "capture_diagnostic_tables", tables)
         minSdk = 29
         targetSdk = 35
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 84
-        versionName = "0.5.0-custom-asr.1" + (providers.gradleProperty("previewNumber").orNull?.let {
+        versionCode = 87
+        versionName = "0.5.2-custom-asr.1" + (providers.gradleProperty("previewNumber").orNull?.let {
             require(it.matches(Regex("[1-9][0-9]*"))) { "previewNumber 必须为正整数" }
             "-preview.$it"
         } ?: "")

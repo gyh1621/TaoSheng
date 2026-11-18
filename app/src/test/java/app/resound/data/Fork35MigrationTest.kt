@@ -23,12 +23,14 @@ class Fork35MigrationTest {
     @Test fun fork35KeepsWholeTextAndAddsUpstreamTables() = migrate(true)
     @Test fun upstream35AlsoGetsWholeStore() = migrate(false)
 
-    private fun migrate(fork: Boolean) = runBlocking(Dispatchers.IO) {
+    @Test fun fork38KeepsWholeTextAndAddsNightTables() = migrate(true, 38)
+
+    private fun migrate(fork: Boolean, version: Int = 35) = runBlocking(Dispatchers.IO) {
         val context = RuntimeEnvironment.getApplication()
-        val name = "fork35-$fork.db"
+        val name = "fork-$version-$fork.db"
         context.deleteDatabase(name)
         val file = context.getDatabasePath(name).also { it.parentFile!!.mkdirs() }
-        val schema = JSONObject(File("../shared/schemas/app.resound.data.CaptureDatabase/${if (fork) 35 else 34}.json").readText()).getJSONObject("database")
+        val schema = JSONObject(File("../shared/schemas/app.resound.data.CaptureDatabase/${if (fork) version else 34}.json").readText()).getJSONObject("database")
         AndroidSQLiteDriver().open(file.path).use { old ->
             val entities = schema.getJSONArray("entities")
             for (i in 0 until entities.length()) {
@@ -41,7 +43,7 @@ class Fork35MigrationTest {
             if (!fork) CaptureDatabase.MIGRATION_34_35.migrate(old)
             old.prepare("INSERT INTO segments(id,startAt,endAt,sourceId,path,sizeBytes,status) VALUES(1,1000,2000,'mic','synthetic.ogg',8,'Done')").use { it.step() }
             if (fork) old.prepare("INSERT INTO whole_transcripts VALUES(1,7,'保留整体原文','Done',NULL,1,2000)").use { it.step() }
-            old.userVersion = 35
+            old.userVersion = version
         }
         val db = Room.databaseBuilder(context, CaptureDatabase::class.java, name)
             .setDriver(AndroidSQLiteDriver()).addMigrations(*CaptureDatabase.MIGRATIONS).build()
@@ -53,7 +55,7 @@ class Fork35MigrationTest {
                 assertEquals("保留整体原文", db.wholeTranscripts().get(1)!!.text)
                 assertEquals(7L, db.wholeTranscripts().get(1)!!.generation)
             } else assertTrue(db.wholeTranscripts().pending().isEmpty())
-            for (table in listOf("screen_events", "screen_app_names", "screen_pull_state", "screen_coverage_gaps", "playback_rows", "marks")) {
+            for (table in listOf("screen_events", "screen_app_names", "screen_pull_state", "screen_coverage_gaps", "playback_rows", "marks", "nights", "night_clips", "folder_recordings")) {
                 db.testSql.query("SELECT COUNT(*) FROM `$table`").use { assertTrue(it.moveToFirst()); assertEquals(0, it.getInt(0)) }
             }
         } finally { db.close(); context.deleteDatabase(name) }

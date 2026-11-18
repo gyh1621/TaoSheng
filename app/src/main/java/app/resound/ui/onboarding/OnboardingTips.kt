@@ -29,13 +29,13 @@ fun OnboardingTipCard(topGap: Dp = 0.dp) {
     val tips by AppGraph.onboarding.tips.collectAsStateWithLifecycle()
     val tip = tips.firstOrNull() ?: return
     val c = Rs.colors
-    val (icon, title, body, page) = when (tip) {
-        OnboardingTip.KeepAlive -> Quad("🔋", "涛声刚才被系统关掉过", app.resound.ui.today.keepAliveHint(androidx.compose.ui.platform.LocalContext.current), SettingsPage.Capture)
-        OnboardingTip.Speakers -> Quad("👥", "最近常有几个人一起说话", "打开“区分说话人”，原话里会分清是谁说的，整理出的事也更准。", SettingsPage.Voiceprint)
-        OnboardingTip.Backup -> Quad("☁️", "已经用了几天，设个备份吧", "换手机、误删都能找回来。可以存在手机文件夹，或坚果云、WebDAV、S3。", SettingsPage.Backup)
-    }
     Spacer(Modifier.height(topGap))
-    AnimatedContent(tip, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "tip") { _ ->
+    AnimatedContent(tip, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "tip") { displayedTip ->
+        val (icon, title, body, page) = when (displayedTip) {
+            OnboardingTip.KeepAlive -> Quad("🔋", "涛声刚才被系统关掉过", app.resound.ui.today.keepAliveHint(androidx.compose.ui.platform.LocalContext.current), SettingsPage.Capture)
+            OnboardingTip.Speakers -> Quad("👥", "最近常有几个人一起说话", "打开“区分说话人”，原话里会分清是谁说的，整理出的事也更准。", SettingsPage.Voiceprint)
+            OnboardingTip.Backup -> Quad("☁️", "已经用了几天，设个备份吧", "换手机、误删都能找回来。可以存在手机文件夹，或坚果云、WebDAV、S3。", SettingsPage.Backup)
+        }
         RsCard(padding = PaddingValues(horizontal = 18.dp, vertical = 16.dp)) {
             Row(verticalAlignment = Alignment.Top) {
                 Text(icon, style = RsType.headline)
@@ -47,7 +47,7 @@ fun OnboardingTipCard(topGap: Dp = 0.dp) {
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Pill("去设置", filled = true) { ShellNav.openSettings(page) }
-                        Pill("知道了", filled = false) { AppGraph.onboarding.dismiss(tip) }
+                        Pill("知道了", filled = false) { AppGraph.onboarding.dismiss(displayedTip) }
                     }
                 }
             }

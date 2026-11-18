@@ -60,7 +60,7 @@ data class SegmentEntity(@PrimaryKey(autoGenerate = true) val id: Long = 0, val 
     /** null 为升级前尚未确定；首次转写按录音开始时刻固化。 */
     val separateSpeakers: Boolean? = null, val importRecordId: Long? = null, val importChannel: Int? = null, val speakerCount: Int? = null,
     /** 外放「仍要转写」片段的整理闸：0 正常；1 暂不参与整理；2 用户已放行。 */
-    @ColumnInfo(defaultValue = "0") val playbackDigest: Int = 0)
+    @ColumnInfo(defaultValue = "0") val playbackDigest: Int = 0, val speakerIntervals: String? = null)
 @Entity(tableName = "watchdog", indices = [Index("at")])
 data class EventEntity(@PrimaryKey(autoGenerate = true) val id: Long = 0, val at: Long, val type: String,
     val detail: String?, val batteryPercent: Int?, val charging: Boolean?, val gapStart: Long? = null, val gapEnd: Long? = null)
@@ -99,7 +99,7 @@ interface CaptureDao {
     fun batteries(start: Long, end: Long): Flow<List<BatteryEntity>>
 }
 
-@Database(entities = [WholeTranscript::class, app.resound.marks.MarkRow::class, TopicRow::class, TopicSpanRow::class, TopicMarkRow::class, DeviceTransfer::class, ImportFingerprint::class, FolderObservation::class,
+@Database(entities = [WholeTranscript::class, app.resound.night.NightRow::class, app.resound.night.NightEventRow::class, app.resound.night.NightClipRow::class, app.resound.night.NightEnvelopeRow::class, app.resound.night.NightFeedbackRow::class, app.resound.night.NightTagRow::class, app.resound.night.NightTagLink::class, app.resound.night.NightDreamRow::class, app.resound.night.NightPersonalRow::class, app.resound.night.NightWeekRow::class, app.resound.night.NightNoticeRow::class, app.resound.importer.FolderRecordingRow::class, app.resound.marks.MarkRow::class, TopicRow::class, TopicSpanRow::class, TopicMarkRow::class, DeviceTransfer::class, ImportFingerprint::class, FolderObservation::class,
     PrivacyFileCleanup::class, ThingRow::class, ThingRecordRow::class, ThingWatchState::class, ImportRecordRow::class, RedoSnapshotRow::class, SegmentEntity::class,
     EventEntity::class, HeartbeatEntity::class, BatteryEntity::class,
     TranscriptLineEntity::class, AsrUsageEntity::class, AsrAttemptEntity::class,
@@ -115,9 +115,11 @@ abstract class CaptureDatabase : RoomDatabase() {
     /** 由安卓装配入口传入；内存测试库为 null，不从底层连接反查路径。 */
     var filePath: String? = null
 
+    abstract fun night(): app.resound.night.NightDao
     abstract fun marks(): app.resound.marks.MarkDao
     abstract fun topics(): TopicDao
     abstract fun deviceSync(): DeviceSyncStore
+    abstract fun folderRecordings(): app.resound.importer.FolderRecordingDao
     abstract fun folderImports(): FolderImportDao
     abstract fun imports(): ImportRecordDao
     abstract fun things(): ThingDao
@@ -139,7 +141,7 @@ abstract class CaptureDatabase : RoomDatabase() {
     abstract fun screenTime(): ScreenTimeDao
     companion object {
         /** 当前数据库版本；加迁移时同步改这里 */
-        const val VERSION = 38
+        const val VERSION = 42
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: androidx.sqlite.SQLiteConnection) {
@@ -425,11 +427,39 @@ abstract class CaptureDatabase : RoomDatabase() {
                 db.execSQL("CREATE TABLE IF NOT EXISTS whole_transcripts (segmentId INTEGER NOT NULL PRIMARY KEY, generation INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL, updatedAt INTEGER NOT NULL, FOREIGN KEY(segmentId) REFERENCES segments(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
             }
         }
+        val MIGRATION_38_39 = object : Migration(38, 39) {
+            override fun migrate(db: androidx.sqlite.SQLiteConnection) = app.resound.importer.FolderRecordingSchema.create(db)
+        }
+        val MIGRATION_39_40 = object : Migration(39, 40) {
+            override fun migrate(db: androidx.sqlite.SQLiteConnection) = app.resound.night.NightSchema.create(db)
+        }
+        val MIGRATION_40_41 = object : Migration(40, 41) {
+            override fun migrate(db: androidx.sqlite.SQLiteConnection) {
+                db.prepare("PRAGMA table_info(segments)").use { columns ->
+                    while (columns.step()) if (columns.getText(1) == "speakerIntervals") return
+                }
+                db.execSQL("ALTER TABLE segments ADD COLUMN speakerIntervals TEXT")
+            }
+        }
+        val MIGRATION_41_42 = object : Migration(41, 42) {
+            override fun migrate(db: androidx.sqlite.SQLiteConnection) {
+                val existing = db.prepare("PRAGMA table_info(nights)").use { cursor ->
+                    buildSet { while (cursor.step()) add(cursor.getText(1)) }
+                }
+                for (name in listOf("kind", "windowId")) if (name !in existing) {
+                    db.execSQL("ALTER TABLE nights ADD COLUMN `$name` TEXT NOT NULL DEFAULT 'night'")
+                }
+                db.execSQL("DROP INDEX IF EXISTS index_nights_date")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_nights_date_kind` ON `nights` (`date`, `kind`)")
+                // 官方 38～41 库没有整体版表；兼容导入且不覆盖自编版原文与 generation。
+                db.execSQL("CREATE TABLE IF NOT EXISTS whole_transcripts (segmentId INTEGER NOT NULL PRIMARY KEY, generation INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL, updatedAt INTEGER NOT NULL, FOREIGN KEY(segmentId) REFERENCES segments(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+            }
+        }
         val MIGRATIONS get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
             MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18,
             MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27,
             MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32, MIGRATION_32_33, MIGRATION_33_34, MIGRATION_34_35, MIGRATION_35_36,
-            MIGRATION_36_37, MIGRATION_37_38)
+            MIGRATION_36_37, MIGRATION_37_38, MIGRATION_38_39, MIGRATION_39_40, MIGRATION_40_41, MIGRATION_41_42)
     }
 }
 

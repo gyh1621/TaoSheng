@@ -5,6 +5,7 @@ import kotlinx.serialization.json.*
 /** 设置与运行状态的跨平台分类；同一文件混合存储时按键过滤，恢复旧包也执行同一规则。 */
 object PreferenceBackupPolicy {
     val settings = mapOf(
+        "zone-history" to "历史时区段，用于解释已发生数据的日期和偏移",
         "marks" to "新打点前后范围（毫秒）",
         "transcribe" to "识别来源、模型、语言、热词、间隔及网络偏好；加密字段另走密钥导出",
         "local-asr" to "本地模型用户选项；排除本机 NPU 检查和下载状态",
@@ -22,6 +23,7 @@ object PreferenceBackupPolicy {
         "llm-providers" to "模型服务商及当前选择",
         "llm-balance" to "余额阈值；排除余额缓存和已提醒标记",
         "asr-speed" to "分人和课堂模式的用户变更历史，供原录音按当时设置解释",
+        "night" to "夜里设置，含推送和第二版功能开关",
         "env-sound" to "环境音过滤选项及用户启用时间边界，避免分析启用前录音",
         "redo-choices" to "用户上次选择的识别来源和整理模型",
         "import-kinds" to "用户上次选择的导入类型",
@@ -41,6 +43,8 @@ object PreferenceBackupPolicy {
         "transcribe-header-secrets", "location-secrets", "backup-encryption-secrets",
     )
     val excluded = mapOf(
+        "night-log" to "夜里记录删除与取消的诊断行，只进问题记录，不备份",
+        "skills-backfill-207" to "升级后会议纪要补跑的完成凭据，本机一次性状态，不备份",
         "custom-asr-formats" to "自定义转写格式能力缓存，30 天重新探测，不备份",
         "onboarding" to "首次转写、向导计时、诊断计数及提示已读均是本机引导状态，沿用既有不备份约定",
         "ask-compatibility" to "服务端能力探测缓存和失败冷却",
@@ -111,7 +115,7 @@ object PreferenceBackupPolicy {
             )
             "local-asr" -> key !in setOf("actual", "npuCheck") && !key.startsWith("download-")
             "llm-balance" -> !key.startsWith("cached") && !key.startsWith("alerted")
-            "folder-imports" -> key == "folders"
+            "folder-imports" -> key in setOf("folders", "backfillPaused")
             "screen-time" -> key != "screenTimeLastPullAt"
             else -> true
         }
