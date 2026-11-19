@@ -61,6 +61,8 @@ enum class NightEventKind {
     Turn,
     /** 卡 203：鼾声中断（不写医学词） */
     SnoreBreak,
+    /** 卡 210：整夜最响的几下（不论是什么声音），留 15 秒录音供回听；不进统计 */
+    Loud,
 }
 
 @Serializable
@@ -209,7 +211,7 @@ interface NightRepository {
     /** 醒来那天的一夜；没有为 null */
     fun night(date: LocalDate): Flow<NightDetail?>
 
-    /** “不是”：事件从统计去掉、录音立即删除、分数留作反馈；“是”：片段长期保存 */
+    /** “不是”：事件从统计去掉、录音立即删除、分数留作反馈；“是”：片段保留到录下后 90 天（卡 210） */
     suspend fun feedback(eventId: Long, value: Feedback)
 
     /** 传 null 的项不改；改完重算并触发线索重写 */

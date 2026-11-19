@@ -254,4 +254,15 @@ class PreferenceBackup190Test {
         assertEquals(37, prefs("quick_prefs").getInt("pauseMinutes", 0))
         assertEquals(77L, prefs("capture").getLong("heartbeat", 0))
     }
+    @Test fun planAndMeteredCredentialsStaySeparateAcrossBackup() {
+        val keys = setOf("encryptedKey", "customEncryptedKey", "planEncryptedKey")
+        val edit = prefs("transcribe").edit().putBoolean("doubaoPlan", true)
+        keys.forEach { edit.putString(it, "synthetic-container") }; edit.commit()
+        BackupSettings.capture(context, root) { store, key -> check(store == "transcribe"); "synthetic-$key" }
+        prefs("transcribe").edit().clear().commit()
+        val restored = mutableMapOf<String, String>()
+        BackupSettings.apply(context, root) { store, key, value -> check(store == "transcribe"); restored[key] = value }
+        assertTrue(prefs("transcribe").getBoolean("doubaoPlan", false))
+        assertEquals(keys.associateWith { "synthetic-$it" }, restored)
+    }
 }

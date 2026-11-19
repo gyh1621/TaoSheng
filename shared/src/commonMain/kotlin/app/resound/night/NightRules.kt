@@ -16,6 +16,15 @@ object NightTuning {
     const val SNORE = .10f
     const val COUGH = .50f
     const val CANDIDATE_DB = 6
+    // 卡 210：整夜最响的几下。至少比背景高 15 分贝才算，留 3 段；彼此隔 15 秒以上；存峰值前 6 秒到后约 8 秒
+    const val LOUD_MIN_DB = 15
+    const val LOUD_KEEP = 3
+    const val LOUD_GAP = 15_000L
+    const val LOUD_BEFORE = 6_000L
+    const val LOUD_AFTER = 10_000L
+    // 卡 210：鼾声中断的回听片段：安静开始前 5 秒到那一声后 8 秒
+    const val BREAK_BEFORE = 5_000L
+    const val BREAK_AFTER = 8_000L
     const val CANDIDATE_LIMIT = 60L * 1024 * 1024
     const val STILL_ANGLE = 5.0
     const val PICKUP_ANGLE = 30.0
@@ -194,4 +203,10 @@ object NightPresentation {
         }
         return listOfNotNull(first,second).joinToString("；")+"。"
     }
+}
+
+/** 回听片段只允许连续采样窗口，不能把暂停或候选录音间的空白压掉。 */
+object NightAudioContinuity {
+    fun contiguous(starts: List<Long>): Boolean = starts.isNotEmpty() &&
+        starts.zipWithNext().all { (a, b) -> b - a == NightTuning.WINDOW * 1000L / NightTuning.RATE }
 }

@@ -13,8 +13,10 @@ internal object HistoryVolumes {
     private data class Ref(val logical: String, val path: String, val bytes: Long, val hash: String)
     private data class Point(val name: String, val at: Long, val bytes: Long, val uploaded: Long,
         val days: Int, val encrypted: Boolean, val refs: List<Ref>) {
-        fun summary() = BackupSummary(days,bytes,at,uploaded,true,encrypted)
+        fun summary() = BackupSummary(days,bytes,at,uploaded,true,encrypted,firstDay(refs.map { it.logical }))
     }
+    /** 恢复点引用的日分卷名里取最早日期，不改格式 */
+    private fun firstDay(names: List<String>) = names.mapNotNull { Regex("days/resound-day-(\\d{4}-\\d{2}-\\d{2})").find(it)?.groupValues?.get(1) }.minOrNull()
     private fun metadata(path: String): RemoteBackup? {
         if (!historyPath(path)) return null
         val parts = path.substringAfter("resound-point-").removeSuffix(".json").split('-')
@@ -60,10 +62,15 @@ internal object HistoryVolumes {
             if(path.endsWith(".enc") && !BackupEncryption.isEncrypted(target))throw BackupFailure("加密备份格式不正确")
             return true
         }
+        /** 卡 210：objects 目录一次列清；原先每个日分卷各问一次存储（几百天就几百次，本机慢、坚果云易限流）。
+         * 列出来是空的但恢复点有引用时不信清单，退回逐个查询，免得误判全部重传 */
+        private val listed: Set<String>? by lazy {
+            runCatching { store.files("objects").map { it.path }.toSet() }.getOrNull()?.takeIf { it.isNotEmpty() || entries.isEmpty() }
+        }
         override fun exists(path: String): Boolean {
             if(path in deleted)return false
             val ref = entries[path] ?: return legacyFallback && store.exists(path)
-            return ref.path in staged || store.exists(ref.path)
+            return ref.path in staged || listed?.contains(ref.path) ?: store.exists(ref.path)
         }
         override fun put(path: String, source: File) {
             require(legacyVolumePath(path))
@@ -128,7 +135,7 @@ internal object HistoryVolumes {
         val current = RemoteBackup(name,time,bytes,summary.encrypted,false)
         try { cleanup(store,(listOf(current)+previous).distinctBy { it.name },keep,work,now) }
         catch(e: Exception) { throw BackupFailure("备份已保存，但旧备份清理未完成，下次备份时重试",true) }
-        return BackupSummary(summary.days,bytes,time,uploaded+file.length(),true,summary.encrypted)
+        return BackupSummary(summary.days,bytes,time,uploaded+file.length(),true,summary.encrypted,firstDay(refs.map { it.logical }))
     }
     private fun cleanup(store: VolumeStore, known: List<RemoteBackup>, keep: Int, work: File, now: Long) {
         val points = (known+list(store)).distinctBy { it.name }.sortedByDescending { it.at }

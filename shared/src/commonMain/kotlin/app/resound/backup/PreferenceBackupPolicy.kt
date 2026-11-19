@@ -50,6 +50,7 @@ object PreferenceBackupPolicy {
         "ask-compatibility" to "服务端能力探测缓存和失败冷却",
         "ask-suggestions" to "问答推荐缓存",
         "backup-diagnostics" to "本机备份诊断",
+        "folder-import-problems" to "卡 210：文件夹录音转写失败的诊断行（不含文件名），只进问题记录，不备份",
         "diary-sync" to "日记上传失败状态",
         "digest-state" to "进行中整理和防重复付费状态，不属于用户设置",
         "export-jobs" to "导出任务队列及进度",
@@ -77,7 +78,7 @@ object PreferenceBackupPolicy {
         "update-times" to "更新检查和安装诊断",
     )
     val backedUp: Set<String> get() = settings.keys + secretPrefs
-    val asrKeys = setOf("encryptedKey", "customEncryptedKey")
+    val asrKeys = setOf("encryptedKey", "customEncryptedKey", "planEncryptedKey")
 
     /** 只解密生产代码使用的凭据键；容器内其他元数据不是密文，不能尝试 Base64 解码。 */
     fun secret(store: String, key: String): Boolean = when (store) {

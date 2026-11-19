@@ -51,17 +51,19 @@ data class NightDreamRow(@PrimaryKey(autoGenerate = true) val id: Long = 0, val 
     @Query("SELECT * FROM night_events WHERE id = :id") suspend fun event(id: Long): NightEventRow?
     @Query("SELECT start FROM night_events WHERE nightId = :id AND kind = 'SnoreBreak'")
     suspend fun breakStarts(id: Long): List<Long>
-    // 即时任务与周期任务可重叠；单条语句兜住两个处理器同时遇到新中断的竞争。
+    // 即时任务与周期任务可重叠；单条语句兜住两个处理器同时遇到新中断的竞争。同一声爆响（结束时刻相同）只算一次。
     @Query("""INSERT INTO night_events(nightId,start,end,kind,payload,certainty,vetoed)
         SELECT :id,:start,:end,'SnoreBreak',:payload,1,0 WHERE NOT EXISTS
-        (SELECT 1 FROM night_events WHERE nightId=:id AND start=:start AND kind='SnoreBreak')""")
+        (SELECT 1 FROM night_events WHERE nightId=:id AND kind='SnoreBreak' AND (start=:start OR end=:end))""")
     suspend fun insertBreak(id: Long,start: Long,end: Long,payload: String)
     @Insert suspend fun insertEvent(row: NightEventRow): Long
     @Update suspend fun updateEvent(row: NightEventRow)
     @Query("DELETE FROM night_events WHERE id = :id") suspend fun deleteEvent(id: Long)
     @Query("SELECT * FROM night_clips WHERE nightId = :id ORDER BY start") suspend fun clips(id: Long): List<NightClipRow>
     @Query("SELECT * FROM night_clips WHERE id = :id") suspend fun clip(id: Long): NightClipRow?
-    @Query("SELECT * FROM night_clips WHERE path IS NOT NULL AND confirmed = 0 AND expiresAt <= :at") suspend fun expired(at: Long): List<NightClipRow>
+    // 卡 210：没确认的到期删；确认过的最多留 90 天（从录下那刻算，覆盖“给医生的一页”最长范围）
+    @Query("""SELECT * FROM night_clips WHERE path IS NOT NULL AND
+        ((confirmed = 0 AND expiresAt <= :at) OR (confirmed = 1 AND start <= :at - 7776000000))""") suspend fun expired(at: Long): List<NightClipRow>
     @Insert suspend fun insertClip(row: NightClipRow): Long
     @Update suspend fun updateClip(row: NightClipRow)
     @Upsert suspend fun envelope(row: NightEnvelopeRow)
