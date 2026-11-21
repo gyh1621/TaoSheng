@@ -63,6 +63,18 @@ class LinePlayerStart091Test {
         assertEquals(0, audio.held)
     }
 
+    @Test fun editUpdatesCaptionWithoutChangingOriginalSegmentBoundaries() {
+        audio()
+        val line = TranscriptLine(1, 1000, 2000, "机器旧字", "0", segmentId = 1)
+        LinePlayer.play(RuntimeEnvironment.getApplication(), listOf(line), 0)
+        LinePlayer.replaceText(1, "人工修正")
+        assertEquals(listOf(line.copy(text = "人工修正", edited = true)), LinePlayer.allLines)
+        assertEquals(listOf(1L), LinePlayer.segmentOrder)
+        LinePlayer.replaceText(99, "别段")
+        assertEquals("人工修正", LinePlayer.allLines.single().text)
+        LinePlayer.stop()
+    }
+
     @Test fun pauseDuringModeSwitchInvalidatesPendingStartAndReturnsCapture() {
         val audio = audio()
         val manager = RuntimeEnvironment.getApplication().getSystemService(AudioManager::class.java)

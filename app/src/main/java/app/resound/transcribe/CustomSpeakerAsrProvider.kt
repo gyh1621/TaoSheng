@@ -33,6 +33,8 @@ class CustomSpeakerAsrProvider(
         }
         val chunks = PauseChunks.split(pcm, turns)
         val output = mutableListOf<AsrSentence>()
+        var inputTokens: Long? = null
+        var outputTokens: Long? = null
         var reserved = false
         var fine = 0
         var fallback = ""
@@ -48,6 +50,8 @@ class CustomSpeakerAsrProvider(
                     if (!reserved) { beforeAudio(); reserved = true }
                     check(audio.file.isFile) { "录音已删除" }
                 }
+                result.inputTokens?.let { inputTokens = (inputTokens ?: 0) + it }
+                result.outputTokens?.let { outputTokens = (outputTokens ?: 0) + it }
                 val text = result.sentences.joinToString("") { it.text }
                 if (text.isBlank()) continue
                 val aligned = if (settings.alignmentEndpoint.value.isNotBlank()) {
@@ -75,7 +79,7 @@ class CustomSpeakerAsrProvider(
             } finally { file.delete() }
         }
         status("切分转写完成：${fine}/${chunks.size} 段已精细对齐" + if (fallback.isNotBlank()) "；$fallback" else "")
-        AsrResult(output, pcm.size / 16L, null)
+        AsrResult(output, pcm.size / 16L, null, inputTokens, outputTokens)
     }
 
     private suspend fun align(audio: AsrAudio, text: String, key: String): List<AsrSentence> {

@@ -5,6 +5,7 @@ import kotlinx.serialization.json.*
 /** 设置与运行状态的跨平台分类；同一文件混合存储时按键过滤，恢复旧包也执行同一规则。 */
 object PreferenceBackupPolicy {
     val settings = mapOf(
+        "search-history" to "最近十条搜索记录",
         "zone-history" to "历史时区段，用于解释已发生数据的日期和偏移",
         "marks" to "新打点前后范围（毫秒）",
         "transcribe" to "识别来源、模型、语言、热词、间隔及网络偏好；加密字段另走密钥导出",
@@ -43,9 +44,13 @@ object PreferenceBackupPolicy {
         "transcribe-header-secrets", "location-secrets", "backup-encryption-secrets",
     )
     val excluded = mapOf(
+        "llm-batch-budget" to "每个模型的批次预算、成功计数与慢模型提示，本机自适应状态，不备份",
+        "llm-stream-support" to "按服务商和模型记忆的 JSON 流式兼容能力，本机状态，不备份",
         "night-log" to "夜里记录删除与取消的诊断行，只进问题记录，不备份",
         "skills-backfill-207" to "升级后会议纪要补跑的完成凭据，本机一次性状态，不备份",
         "custom-asr-formats" to "自定义转写格式能力缓存，30 天重新探测，不备份",
+        "recording-keep" to "长期保留录音的提醒节奏（空间不足通知每天一次、坚果云额度每月一次），本机状态，不备份",
+        "custom-asr-verified" to "自定义转写测试通过的结论，按配置指纹存本机，恢复后需重新测试，不备份",
         "onboarding" to "首次转写、向导计时、诊断计数及提示已读均是本机引导状态，沿用既有不备份约定",
         "ask-compatibility" to "服务端能力探测缓存和失败冷却",
         "ask-suggestions" to "问答推荐缓存",
@@ -78,7 +83,7 @@ object PreferenceBackupPolicy {
         "update-times" to "更新检查和安装诊断",
     )
     val backedUp: Set<String> get() = settings.keys + secretPrefs
-    val asrKeys = setOf("encryptedKey", "customEncryptedKey", "planEncryptedKey")
+    val asrKeys = setOf("encryptedKey", "customEncryptedKey", "qwenEncryptedKey", "planEncryptedKey")
 
     /** 只解密生产代码使用的凭据键；容器内其他元数据不是密文，不能尝试 Base64 解码。 */
     fun secret(store: String, key: String): Boolean = when (store) {

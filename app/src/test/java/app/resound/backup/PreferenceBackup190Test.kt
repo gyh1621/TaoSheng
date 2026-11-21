@@ -265,4 +265,20 @@ class PreferenceBackup190Test {
         assertTrue(prefs("transcribe").getBoolean("doubaoPlan", false))
         assertEquals(keys.associateWith { "synthetic-$it" }, restored)
     }
+
+    @Test fun restoredLegacyPushDoesNotGrantAudioConsent() = kotlinx.coroutines.runBlocking {
+        val channels=app.resound.push.AndroidPushChannels(context)
+        channels.saveWithSubscription(null,app.resound.push.PushKind.LocalFolder,"合成旧通道",
+            mapOf("treeUri" to "content://test/tree/backup","displayName" to "backup"),app.resound.push.PushSubscription(),
+            app.resound.push.PushFormat.Markdown,false).getOrThrow()
+        val rows=org.json.JSONArray(prefs("push").getString("channels","[]"))
+        val sub=rows.getJSONObject(0).getJSONObject("subscription")
+        for(key in listOf("audio","audioCalls","audioImports","audioPrivacyDelete"))sub.remove(key)
+        prefs("push").edit().putString("channels",rows.toString()).commit()
+        BackupSettings.capture(context,root)
+        prefs("push").edit().clear().commit(); BackupSettings.apply(context,root)
+        val restored=app.resound.push.AndroidPushChannels(context).channels.value.single().subscription
+        assertEquals(app.resound.push.AudioPush.Off,restored.audio)
+        assertFalse(restored.audioCalls); assertFalse(restored.audioImports)
+    }
 }

@@ -75,6 +75,10 @@ class ResoundApp : Application() {
         if (getProcessName().endsWith(":local_asr")) return
         registerActivityLifecycleCallbacks(BackgroundTranscribeDiagnostics)
         app.resound.backup.BackupRestore.applyPending(this)
+        val searchHistoryPrefs = getSharedPreferences("search-history", MODE_PRIVATE)
+        AppGraph.searchHistory = app.resound.search.SearchHistory(
+            { searchHistoryPrefs.getString("items", null) },
+            { check(searchHistoryPrefs.edit().putString("items", it).commit()) { "搜索历史保存失败" } })
         scope.launch {
             val tables = getString(R.string.capture_diagnostic_tables).split(',').toTypedArray()
             database.invalidationTracker.addObserver(object : androidx.room.InvalidationTracker.Observer(tables) {
@@ -118,7 +122,7 @@ class ResoundApp : Application() {
         val scheduler = TranscribeScheduler(this, settings)
         transcribeScheduler = scheduler
         segmentFiles.onSaved = {
-            // 专题结束时可能还没自然分片/编码完；最后一段落盘后也立即转写，不等定时批次。
+            // 会中和结束后的专题段录完就转；仍使用调度器原有网络约束。
             if (database.topics().pendingAudio() > 0) scheduler.runNow()
             else scheduler.segmentSaved(database.transcribe().pendingMillis())
         }
@@ -199,7 +203,12 @@ class ResoundApp : Application() {
         val originalAudio = LocalOriginalAudio(database.transcribe(), getSharedPreferences("transcribe", MODE_PRIVATE), scope,
             guard = { block -> voiceprintRepository.withAudioCleanup(block) },
             extraPending = { database.wholeTranscripts().pendingIds().toSet() },
-            playback = PlaybackCaptureHold(scope, CaptureService::playbackHold))
+            playback = PlaybackCaptureHold(scope, CaptureService::playbackHold),
+            protection = {
+                check(AppGraph.isPushReady) { "录音保留尚未就绪" }
+                checkNotNull((AppGraph.push as? app.resound.push.AndroidPushChannels)?.audioPush).protectedIds()
+            },
+            keepChannels = { if (AppGraph.isPushReady) (AppGraph.push as? app.resound.push.AndroidPushChannels)?.audioPush?.channelNames().orEmpty() else emptyList() })
         AppGraph.originalAudio = originalAudio
         voiceprintRepository.cleanupOriginalAudio = originalAudio::cleanup
         val privacyActions = app.resound.privacy.RoomPrivacyActions(database,
@@ -207,6 +216,9 @@ class ResoundApp : Application() {
             recentFiles = { from, until, block -> segmentFiles.withRecentDeletion(from, until, block) },
             voiceprintGuard = { block -> voiceprintRepository.withPrivacyDeletion(block) },
             removeFeatures = voiceprintRepository::removeFeatures,
+            recordingPrivacy = { ids, block ->
+                checkNotNull((AppGraph.push as? app.resound.push.AndroidPushChannels)?.audioPush).withPrivacy(ids, block)
+            },
             onErased = {
                 if (AppGraph.isPushReady) (AppGraph.push as? app.resound.push.AndroidPushChannels)?.privacyChanges?.trySend(Unit)
                 app.resound.push.DayThreadPushScheduler.afterDeletion(this)
@@ -249,6 +261,7 @@ class ResoundApp : Application() {
             beforeTranscribe = envSound::beforeTranscribe,
             beginBatch = { envSound.beginBatch() }, endBatch = { envSound.endBatch() }, sharedPcm = sharedPcm,
             afterSegment = { segment ->
+                app.resound.topic.TopicWork.enqueue(this)
                 if (database.transcribe().segment(segment.id).let { it.separateSpeakers != false || (it.importChannel != null && it.speakerCount != 0) }) {
                     PipelineProgress.stage(PipelineProgress.Stage.Voiceprint)
                     try { voiceprintRepository.runSegment(segment.id) }
@@ -265,16 +278,17 @@ class ResoundApp : Application() {
                 }
             })
         transcribeRunner.localResume = app.resound.transcribe.local.LocalResumeQueue(this)
-        settings.testKey = { key ->
+        settings.testWithCapability = { key, capability ->
             val file = File.createTempFile("asr-test-", ".ogg", cacheDir)
             try {
                 assets.open("asr-test.ogg").use { input -> file.outputStream().use { input.copyTo(it) } }
-                transcribeRunner.test(AsrAudio(file, "ogg", 3007), key)
+                transcribeRunner.test(AsrAudio(file, "ogg", 3007), key) { result -> result.customCapability?.let(capability) }
             } finally { file.delete() }
         }
         settings.onChanged = { scheduler.settingsChanged(scope) }
         val serviceHeaders = app.resound.digest.ServiceHeaders(this)
-        val llm = LlmClient(requestHeaders = serviceHeaders::forPreset, diagnostics = app.resound.diagnostics.LlmDiagnostics(this))
+        val jsonStreamSupport = app.resound.digest.AndroidJsonStreamSupport(this)
+        val llm = LlmClient(streamSupport = jsonStreamSupport, requestHeaders = serviceHeaders::forPreset, diagnostics = app.resound.diagnostics.LlmDiagnostics(this))
         val digestSettings = AndroidDigestSettings(this, llm) { reply ->
             database.memory().addUsage(java.time.LocalDate.now().toString(), reply.promptTokens,
                 reply.completionTokens, app.resound.usage.UsagePurpose.Other)
@@ -320,16 +334,16 @@ class ResoundApp : Application() {
         AppGraph.digestTiming = digestSettings.timing
         scheduler.digestTiming = digestSettings.timing
         digestSettings.timing.onChanged = scheduler::timingChanged
-        // 独立 20 秒 HTTP 上限也覆盖响应体读取；不改变日常整理的长请求上限。
-        val todoLlm = LlmClient(okhttp3.OkHttpClient.Builder()
-            .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS).build(), requestHeaders = serviceHeaders::forPreset)
+        // 手动待办仍由业务层的 20 秒 deadline 取消；JSON 传输统一使用自适应接收。
+        val todoLlm = LlmClient(requestHeaders = serviceHeaders::forPreset, streamSupport = jsonStreamSupport)
         AppGraph.manualTodos = RoomManualTodos(database.memory(), scope,
             { digestSettings.skillCredentials(null) }, digestSettings.failover.request("手动待办", database.memory(), app.resound.usage.UsagePurpose.Digest, todoLlm::chatJson), { reply ->
                 database.memory().addUsage(java.time.LocalDate.now().toString(), reply.promptTokens,
                     reply.completionTokens, app.resound.usage.UsagePurpose.Digest)
             }, hasBackup = { digestSettings.canUseWithoutKey(it) || digestSettings.failover.hasBackup(it) })
         AppGraph.todoVoice = AndroidTodoVoiceInput(controller, scope, cacheDir,
-            ConfiguredAsrProvider(this, settings, hotwords::merged), settings::credential)
+            ConfiguredAsrProvider(this, settings, hotwords::merged), settings::credential,
+            recordTokens = { result -> database.transcribe().recordTokens(java.time.LocalDate.now().toString(), result.inputTokens, result.outputTokens) })
         scheduler.digestMinutes = { digestSettings.intervalMinutes.value }
         digestSettings.onIntervalChanged = { scheduler.scheduleDigest() }
         val reviewScheduler = app.resound.review.ReviewScheduler(this)

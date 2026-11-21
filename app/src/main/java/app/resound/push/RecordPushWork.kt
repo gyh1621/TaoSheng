@@ -20,14 +20,14 @@ class RecordPushWork(context: Context, params: WorkerParameters) : CoroutineWork
 internal class RecordPushScheduler(private val context: Context) {
     fun enqueue(id: Long, at: Long, continuation: Boolean) {
         WorkManager.getInstance(context).enqueueUniqueWork("push-subscription-$id",
-            if (continuation) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.REPLACE, request(id, at)).result.get()
+            if (continuation) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.REPLACE, request(id, at, AppGraph.isPushReady && (AppGraph.push as? AndroidPushChannels)?.channels?.value?.find { it.id == id }?.kind == PushKind.LocalFolder)).result.get()
     }
     fun cancel(id: Long) { WorkManager.getInstance(context).cancelUniqueWork("push-subscription-$id") }
     companion object {
-        fun request(id: Long, at: Long) = OneTimeWorkRequestBuilder<RecordPushWork>()
+        fun request(id: Long, at: Long, local: Boolean = false) = OneTimeWorkRequestBuilder<RecordPushWork>()
             .setInputData(workDataOf("channelId" to id)).addTag("push-subscription")
             .setInitialDelay((at - System.currentTimeMillis()).coerceAtLeast(0), TimeUnit.MILLISECONDS)
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(if (local) NetworkType.NOT_REQUIRED else NetworkType.CONNECTED).build())
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
     }
 }
@@ -67,9 +67,16 @@ internal fun AndroidPushChannels.attachSubscriptions(context: Context, database:
 @OptIn(FlowPreview::class)
 internal suspend fun AndroidPushChannels.observeRecordPush(database: CaptureDatabase) {
     val records = database.invalidationTracker.createFlow("memory_events", "memory_items", "transcript_lines",
-        "skill_cards", "reviews", emitInitialState = true).map { Unit }
-    merge(records, privacyChanges.receiveAsFlow()).debounce(1000).collect {
-        recordsChanged()
-        phoneReminders?.refresh()
-    }
+        "skill_cards", "reviews", emitInitialState = true).map { false }
+    // 提醒只看事件和待办；每句新转写都会改 transcript_lines，录音时约每分钟一次，
+    // 旧做法每次都把全部历史读两遍来算提醒。原话变了只需让推送按计划更新。
+    val reminderTables = database.invalidationTracker.createFlow("memory_events", "memory_items", "folder_recordings",
+        emitInitialState = true).map { true }
+    val reminders = java.util.concurrent.atomic.AtomicBoolean(false)
+    merge(records, reminderTables, privacyChanges.receiveAsFlow().map { true })
+        .onEach { if (it) reminders.set(true) }.debounce(1000).collect {
+            val refresh = reminders.getAndSet(false)
+            recordsChanged(refresh)
+            if (refresh) phoneReminders?.refresh()
+        }
 }

@@ -88,7 +88,8 @@ internal class ImportSummary(
                 try { parse(text); reply?.diagnostics?.parsed(empty = false) }
                 catch (e: LlmException) { reply?.diagnostics?.parsed(empty = text.isBlank(), error = e.type); throw e }
             }
-            val call: suspend (String, String) -> String = { a, b -> request(a, b).also { reply = it }.content }
+            // 这里会把太慢/截断的一块切小重试（splitRead / splitTopicRead），先不切备用模型。
+            val call: suspend (String, String) -> String = { a, b -> kotlinx.coroutines.withContext(app.resound.digest.LlmSplitsOnSlow) { request(a, b) }.also { reply = it }.content }
             val content = session?.request(system, user, call, validate, ::preview) ?: call(system, user)
             return parse(content)
         }
@@ -104,7 +105,9 @@ internal class ImportSummary(
                 }
                 ask(wholeDigestText(text, part, wholeRows.filter { row -> part.any { it.segmentId == row.segmentId } }))
             }
-            leaves += session?.splitRead(chunk, read) ?: listOf(read(chunk))
+            leaves += session?.splitRead(chunk, read) ?: splitTopicRead(chunk, {
+                it is LlmException && it.type in setOf(LlmError.Format, LlmError.TooSlow, LlmError.Truncated)
+            }, read)
             session?.advance()
         }
         // 没有可转写原话仍保存一份明确说明的纪要，不伪造会议内容。

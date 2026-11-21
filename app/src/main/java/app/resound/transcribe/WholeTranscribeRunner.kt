@@ -38,6 +38,10 @@ class WholeTranscribeRunner(
                     (segment.endAt - segment.startAt).coerceAtLeast(0), separateSpeakers = false), credential()) {
                     check(dao.get(row.segmentId)?.let { it.generation == row.generation && it.status == "Running" } == true)
                 }
+                withContext(NonCancellable) {
+                    val day = java.time.Instant.ofEpochMilli(now()).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString()
+                    segments.recordTokens(day, result.inputTokens, result.outputTokens)
+                }
                 if (config != identity()) throw AsrException(AsrError.Interrupted, detail = "配置已更改，请重新转录")
                 val text = result.sentences.joinToString("\n") { it.text }
                 val notice = if (text.isNotBlank() && segments.linesForRedo(row.segmentId).none { it.text.isNotBlank() })

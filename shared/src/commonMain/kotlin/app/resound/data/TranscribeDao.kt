@@ -15,9 +15,13 @@ data class TranscriptLineEntity(@PrimaryKey(autoGenerate = true) val id: Long = 
     @ColumnInfo(defaultValue = "0") val speakerManual: Boolean = false,
     val voiceInputJson: String? = null, val voiceInputPendingUntil: Long? = null,
     /** 本地同音纠正前的整句；未纠正为 null。 */
-    val originalText: String? = null)
+    val originalText: String? = null,
+    /** 卡 211：人工修改文字的时间；没改过为 null。重新转写会生成新行，自然回到机器结果 */
+    val textEditedAt: Long? = null)
 @Entity(tableName = "asr_usage")
-data class AsrUsageEntity(@PrimaryKey val day: String, val sentMillis: Long)
+data class AsrUsageEntity(@PrimaryKey val day: String, val sentMillis: Long,
+    @ColumnInfo(defaultValue = "0") val inputTokens: Long = 0,
+    @ColumnInfo(defaultValue = "0") val outputTokens: Long = 0)
 /** 严格只存元数据；禁止异常原文、识别原文或请求头。 */
 @Entity(tableName = "asr_attempts")
 data class AsrAttemptEntity(@PrimaryKey(autoGenerate = true) val id: Long = 0, val segmentId: Long?,
@@ -68,9 +72,12 @@ abstract class TranscribeDao {
 
     @Transaction
     @Query("SELECT * FROM segments") abstract suspend fun allAudio(): List<SegmentEntity>
-    @Query("""SELECT s.id FROM segments s WHERE EXISTS (SELECT 1 FROM memory_events e
-        WHERE e.starred = 1 AND e.deleted = 0 AND s.startAt < e.endAt AND s.endAt > e.startAt)
-        OR EXISTS (SELECT 1 FROM marks m WHERE s.startAt < m.at + m.afterMillis AND s.endAt > m.at - m.beforeMillis)""")
+    // 先取少量收藏事件/标记，再逐个对录音段做区间比对（CROSS JOIN 固定外层顺序）。
+    // 旧写法让每段录音去扫全部事件，几万段时一次要 8 秒，且推录音每次刷新都会调用。
+    @Query("""SELECT DISTINCT s.id FROM (
+        SELECT startAt AS a, endAt AS b FROM memory_events WHERE starred = 1 AND deleted = 0
+        UNION ALL SELECT at - beforeMillis AS a, at + afterMillis AS b FROM marks
+    ) k CROSS JOIN segments s WHERE s.startAt < k.b AND s.endAt > k.a""")
     abstract suspend fun starredAudio(): List<Long>
 
     @Query("SELECT EXISTS(SELECT 1 FROM segments WHERE path IN (:ogg, :m4a))")
@@ -105,7 +112,7 @@ abstract class TranscribeDao {
     abstract fun usageBetween(from: String, to: String): Flow<List<AsrUsageEntity>>
     @Query("SELECT * FROM asr_usage") abstract fun observeUsage(): Flow<List<AsrUsageEntity>>
     // 超时只影响本段：到期后排在其他候选后面，避免长段反复占住队首。
-    @Query("SELECT * FROM segments WHERE status = 'Pending' OR (status = 'Failed' AND attempts < 5 AND nextRetryAt <= :now) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM topic_spans ts JOIN topics t ON t.id = ts.topicId WHERE t.status IN ('Ended', 'Summarizing', 'Failed') AND segments.startAt < ts.endAt AND segments.endAt > ts.startAt) THEN 0 ELSE 1 END, CASE WHEN error = '转写超时，等待重试' THEN 1 ELSE 0 END, startAt, id")
+    @Query("SELECT * FROM segments WHERE status = 'Pending' OR (status = 'Failed' AND attempts < 5 AND nextRetryAt <= :now) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM topic_spans ts JOIN topics t ON t.id = ts.topicId WHERE t.status IN ('Running', 'Paused', 'Ended', 'Summarizing', 'Failed') AND segments.startAt < COALESCE(ts.endAt, :now) AND segments.endAt > ts.startAt) THEN 0 ELSE 1 END, CASE WHEN error = '转写超时，等待重试' THEN 1 ELSE 0 END, startAt, id")
     protected abstract suspend fun candidateRows(now: Long): List<SegmentEntity>
     @Transaction
     open suspend fun candidates(now: Long): List<SegmentEntity> {
@@ -191,6 +198,12 @@ abstract class TranscribeDao {
     @Query("SELECT * FROM segments WHERE id = :id") abstract suspend fun segment(id: Long): SegmentEntity
     @Query("DELETE FROM transcript_lines WHERE segmentId = :id") abstract suspend fun deleteLines(id: Long)
     @Insert abstract suspend fun insertLines(lines: List<TranscriptLineEntity>)
+    /** 卡 211：人工修改一句原话：直接替换文字，清掉同音纠正前的旧句，记下修改时间；全文索引由触发器跟上 */
+    @Query("UPDATE transcript_lines SET text = :text, originalText = NULL, textEditedAt = :at WHERE id = :id")
+    abstract suspend fun editLineText(id: Long, text: String, at: Long): Int
+    /** 卡 211：这些录音段里人工改过几句（重新转写会覆盖它们） */
+    @Query("SELECT COUNT(*) FROM transcript_lines WHERE segmentId IN (:segmentIds) AND textEditedAt IS NOT NULL")
+    abstract suspend fun editedLineCount(segmentIds: List<Long>): Int
     @Query("SELECT * FROM transcript_lines WHERE segmentId = :id ORDER BY startAt, id")
     abstract suspend fun linesForRedo(id: Long): List<TranscriptLineEntity>
     @Query("UPDATE memory_items SET lineId = :replacement WHERE lineId = :old")
@@ -213,6 +226,14 @@ abstract class TranscribeDao {
         insertUsage(AsrUsageEntity(day, 0))
         addUsage(day, millis)
         if (segmentId != null) addSegmentUsage(segmentId, millis)
+    }
+    @Query("UPDATE asr_usage SET inputTokens = inputTokens + :input, outputTokens = outputTokens + :output WHERE day = :day")
+    abstract suspend fun addTokens(day: String, input: Long, output: Long)
+    @Transaction
+    open suspend fun recordTokens(day: String, input: Long?, output: Long?) {
+        if (input == null && output == null) return
+        insertUsage(AsrUsageEntity(day, 0))
+        addTokens(day, (input ?: 0).coerceAtLeast(0), (output ?: 0).coerceAtLeast(0))
     }
     @Insert abstract suspend fun attempt(row: AsrAttemptEntity)
     @Query("SELECT * FROM asr_attempts ORDER BY id DESC LIMIT 20") abstract suspend fun recentAttempts(): List<AsrAttemptEntity>

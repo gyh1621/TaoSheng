@@ -141,7 +141,7 @@ abstract class CaptureDatabase : RoomDatabase() {
     abstract fun screenTime(): ScreenTimeDao
     companion object {
         /** 当前数据库版本；加迁移时同步改这里 */
-        const val VERSION = 42
+        const val VERSION = 44
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: androidx.sqlite.SQLiteConnection) {
@@ -441,6 +441,15 @@ abstract class CaptureDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE segments ADD COLUMN speakerIntervals TEXT")
             }
         }
+        /** 卡 211：原话可人工修改，记下修改时间 */
+        val MIGRATION_42_43 = object : Migration(42, 43) {
+            override fun migrate(db: androidx.sqlite.SQLiteConnection) {
+                val existing = db.prepare("PRAGMA table_info(transcript_lines)").use { cursor ->
+                    buildSet { while (cursor.step()) add(cursor.getText(1)) }
+                }
+                if ("textEditedAt" !in existing) db.execSQL("ALTER TABLE transcript_lines ADD COLUMN `textEditedAt` INTEGER")
+            }
+        }
         val MIGRATION_41_42 = object : Migration(41, 42) {
             override fun migrate(db: androidx.sqlite.SQLiteConnection) {
                 val existing = db.prepare("PRAGMA table_info(nights)").use { cursor ->
@@ -455,11 +464,23 @@ abstract class CaptureDatabase : RoomDatabase() {
                 db.execSQL("CREATE TABLE IF NOT EXISTS whole_transcripts (segmentId INTEGER NOT NULL PRIMARY KEY, generation INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL, updatedAt INTEGER NOT NULL, FOREIGN KEY(segmentId) REFERENCES segments(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
             }
         }
+        val MIGRATION_43_44 = object : Migration(43, 44) {
+            override fun migrate(db: androidx.sqlite.SQLiteConnection) {
+                val existing = db.prepare("PRAGMA table_info(asr_usage)").use { cursor ->
+                    buildSet { while (cursor.step()) add(cursor.getText(1)) }
+                }
+                for (name in listOf("inputTokens", "outputTokens")) if (name !in existing) {
+                    db.execSQL("ALTER TABLE asr_usage ADD COLUMN $name INTEGER NOT NULL DEFAULT 0")
+                }
+                // 官方 42/43 没有自编整体版表，升级时幂等补齐，不覆盖已有原文与 generation。
+                db.execSQL("CREATE TABLE IF NOT EXISTS whole_transcripts (segmentId INTEGER NOT NULL PRIMARY KEY, generation INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL, updatedAt INTEGER NOT NULL, FOREIGN KEY(segmentId) REFERENCES segments(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+            }
+        }
         val MIGRATIONS get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
             MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18,
             MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27,
             MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32, MIGRATION_32_33, MIGRATION_33_34, MIGRATION_34_35, MIGRATION_35_36,
-            MIGRATION_36_37, MIGRATION_37_38, MIGRATION_38_39, MIGRATION_39_40, MIGRATION_40_41, MIGRATION_41_42)
+            MIGRATION_36_37, MIGRATION_37_38, MIGRATION_38_39, MIGRATION_39_40, MIGRATION_40_41, MIGRATION_41_42, MIGRATION_42_43, MIGRATION_43_44)
     }
 }
 

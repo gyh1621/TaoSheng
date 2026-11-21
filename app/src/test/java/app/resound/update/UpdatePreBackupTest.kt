@@ -40,14 +40,16 @@ class UpdatePreBackupTest {
         scenario {
             download(); finishBackup()
             engine.install(); awaitInstall()
+            // 用户已看到确认框后的取消；未显示确认框的系统中止由另一组自动重提测试覆盖。
+            assertTrue(engine.pending(51))
             engine.installResult(51, cancelled = true)
             clock += SIX_HOURS
             engine.install()
             // 同一 gate 作完成屏障；submitted 在第一次安装时已经完成。
             engine.checkNow()
             withTimeout(5000) {
-                engine.awaitState { it is UpdateState.Installing }
-                engine.checkNow()
+                // Installing 在异步备份开始前就出现；等第二次提交，不能把旧状态当完成屏障。
+                while (platform.installs < 2) delay(10)
             }
             assertEquals(2, platform.backups)
             assertEquals(2, platform.installs)
