@@ -81,6 +81,33 @@ internal class RedoSnapshot(private val db: CaptureDatabase) {
             }
             return copy.toString()
         }
-        comparable(rows(table, "$key IN (${ids.sqlIds()})")) == comparable(old)
+        fun idsOf(name: String, column: String = "id"): List<Long> = data.optJSONArray(name)?.let { a ->
+            (0 until a.length()).map { a.getJSONObject(it).getLong(column) }
+        }.orEmpty()
+        // 既核对旧行，也发现后台新增的子行；否则空 B 或新 A/引用可能绕过 ID 快照校验。
+        val where = when (table) {
+            "whole_transcripts" -> "$key IN (${(ids + idsOf("segments") + idsOf("transcript_lines", "segmentId")).sqlIds()})"
+            "transcript_lines" -> "id IN (${ids.sqlIds()}) OR segmentId IN (${idsOf("segments").sqlIds()}) OR eventId IN (${idsOf("memory_events").sqlIds()})"
+            "memory_items" -> "id IN (${ids.sqlIds()}) OR eventId IN (${idsOf("memory_events").sqlIds()}) OR lineId IN (${idsOf("transcript_lines").sqlIds()}) OR doneHintLineId IN (${idsOf("transcript_lines").sqlIds()})"
+            else -> "$key IN (${ids.sqlIds()})"
+        }
+        comparable(rows(table, where)) == comparable(old)
     }
+}
+
+/** 隐私删除还要清掉含该录音的旧快照，不能把已删除原话留在可导出的 JSON 中。 */
+internal suspend fun clearRedoForPrivacy(db: CaptureDatabase, segmentIds: Set<Long>, eventId: Long?) {
+    val row = db.redoData().fullSnapshot() ?: return
+    val affected = runCatching {
+        val payload = JSONObject(row.payload)
+        listOf("before", "after").any { side ->
+            val data = payload.getJSONObject(side)
+            listOf("segments" to "id", "transcript_lines" to "segmentId", "whole_transcripts" to "segmentId", "memory_events" to "id").any { (table, column) ->
+                val a = data.optJSONArray(table) ?: JSONArray()
+                (0 until a.length()).any { i -> val id = a.getJSONObject(i).getLong(column)
+                    if (table == "memory_events") eventId == id else id in segmentIds }
+            }
+        }
+    }.getOrDefault(true)
+    if (affected) db.redoData().clear()
 }

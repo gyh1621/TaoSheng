@@ -123,6 +123,7 @@ class RoomPrivacyActions(
             val selected = select()
             val result = recordingPrivacy(selected.map { it.id }) { db.writeTransaction {
                 onStage(EventDeletionPhase.Records)
+                app.resound.redo.clearRedoForPrivacy(db, selected.map { it.id }.toSet(), explicitEvent)
                 val segments = selected
                 val explicitRange = explicitEvent?.let { db.memory().event(it) }?.let { it.startAt to it.endAt }
                 for (path in extraFiles.distinct()) dao.queueCleanup(PrivacyFileCleanup(path))

@@ -145,7 +145,10 @@ class Redo071Test {
         try { run(e, request = RedoRequest(listOf(1), scope = RedoScope.TranscribeAndDigest)); fail() } catch (_: CancellationException) { }
         assertEquals("旧事件", db.memory().event(1)!!.title)
         assertEquals("新原话", db.transcribe().exportSegments(listOf(1)).single().lines.single().text)
-        assertTrue(e.undo("one").isSuccess)
+        // 未完成/未应用的快照不能从底层撤销；部分成功转写仍保留，供用户显式重做。
+        assertFalse(db.redoData().snapshotMeta()!!.applied)
+        assertTrue(e.undo("one").isFailure)
+        assertEquals("新原话", db.transcribe().exportSegments(listOf(1)).single().lines.single().text)
     }
     @Test fun llmFailureKeepsEventsAndLaterEditsBlockUnsafeUndo() = runBlocking {
         seed(); val bad = engine(onDigest = { throw LlmException(LlmError.Format) })
@@ -232,6 +235,28 @@ class Redo071Test {
         assertTrue(restored.jobs.value.all { it.state is RedoJobState.Done })
         assertFalse((restored.job(a)!!.state as RedoJobState.Done).undoable)
         assertTrue(restored.undo(b).isSuccess)
+    }
+    /** 卡 219（#61）：点“好”关掉任务后，撤销入口仍按快照保留；0.5.4 关掉的（没留类型）也能撤；撤完入口消失 */
+    @Test fun dismissedJobStaysUndoableUntilUndone() = runBlocking {
+        seed()
+        fun service() = AndroidRedoService(context, db, chooser, engine(), scope, { listOf(LlmOption("x", "x", true)) }, { "x" }, enqueue = {}, now = { 100 })
+        val s = service()
+        val id = s.start(RedoRequest(segmentIds = listOf(1), scope = RedoScope.TranscribeOnly))
+        assertNull(s.undoable.value) // 还没跑完不能撤
+        s.drain { }
+        s.dismiss(id)
+        assertTrue(s.jobs.value.isEmpty())
+        val kept = withTimeout(5000) { s.undoable.first { it != null } }!!
+        assertEquals(id, kept.jobId); assertEquals(RedoScope.TranscribeOnly, kept.scope); assertEquals(100 + 86_400_000L, kept.expiresAt)
+        // 模拟 0.5.4 已关掉的任务：没有类型记录，重启后仍能看到并撤销
+        context.getSharedPreferences("redo-jobs", 0).edit().remove("undo-meta").commit()
+        val legacy = service()
+        val old = withTimeout(5000) { legacy.undoable.first { it != null } }!!
+        assertEquals(id, old.jobId); assertNull(old.scope); assertNull(old.title)
+        assertTrue(legacy.undo(id).isSuccess)
+        assertEquals("旧原话", db.transcribe().exportSegments(listOf(1)).single().lines.single().text)
+        withTimeout(5000) { legacy.undoable.first { it == null } }
+        Unit
     }
     @Test fun largeSnapshotIsReadBackInPartsUnchanged() = runBlocking {
         val big = "整天的快照" .repeat(90_000) + "尾"

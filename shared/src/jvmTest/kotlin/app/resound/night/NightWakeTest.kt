@@ -41,4 +41,28 @@ class NightWakeTest {
         assertFalse(NightRules.canReopen(NightState.Ready)); assertFalse(NightRules.canReopen(NightState.Processing))
         assertTrue(NightRules.canReopen(NightState.Interrupted)); assertTrue(NightRules.canReopen(null))
     }
+
+    @Test fun interruptedNightStaysOpenUntilItsWindowEnds() {
+        // #59：01:19 重启被标成中断，整理任务不能在时段内把它定成 Ready，否则当晚再也续不上
+        val deadline = t(12, 0)
+        assertFalse(NightRules.readyToProcess(NightState.Interrupted, deadline, t(1, 30)))
+        assertTrue(NightRules.canReopen(NightState.Interrupted))
+        // 时段结束、进程也没再续上：照常整理
+        assertTrue(NightRules.readyToProcess(NightState.Interrupted, deadline, t(12, 0)))
+        // 没有 deadline 的旧记录、正常结束的夜晚：照旧立即整理
+        assertTrue(NightRules.readyToProcess(NightState.Interrupted, null, t(1, 30)))
+        assertTrue(NightRules.readyToProcess(NightState.Processing, deadline, t(1, 30)))
+    }
+    @Test fun restartHonorsWindowIdentityDeadlineAndMissingModelWithoutStitchingGap() {
+        val end=t(12,0)
+        assertTrue(NightRules.canResume(NightState.Interrupted,"night","night",end,t(2,0)))
+        assertFalse(NightRules.canResume(NightState.Interrupted,"old","night",end,t(2,0)))
+        assertFalse(NightRules.canResume(NightState.Interrupted,"night","night",end,end))
+        val interrupted=night().copy(lastAt=t(1,0),deadline=end).interruptedUntil(t(2,0))
+        assertTrue(interrupted.signals.any { it.kind=="gap" && it.start==t(1,0) && it.end==t(2,0) })
+        assertFalse(NightAudioContinuity.contiguous(listOf(t(1,0),t(2,0))))
+        assertEquals(NightMode.Deferred,NightRules.mode(config.copy(fullNight=true),80,true,false,false))
+        assertEquals(NightMode.Full,NightRules.mode(config.copy(fullNight=true),80,true,false,true))
+    }
+
 }

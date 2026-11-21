@@ -12,6 +12,7 @@ data class RedoSnapshotRow(@PrimaryKey val slot: Int = 1, val jobId: String, val
 interface RedoDao {
     /** 不读快照正文：整天重做的快照可能超过 2MB，一次读出会让数据库游标装不下而闪退 */
     @Query("SELECT slot, jobId, at, '' AS payload, applied FROM redo_snapshot WHERE slot = 1") suspend fun snapshotMeta(): RedoSnapshotRow?
+    @Query("SELECT slot, jobId, at, '' AS payload, applied FROM redo_snapshot WHERE slot = 1") fun observeSnapshotMeta(): kotlinx.coroutines.flow.Flow<RedoSnapshotRow?>
     @Query("SELECT length(payload) FROM redo_snapshot WHERE slot = 1") suspend fun payloadLength(): Int?
     @Query("SELECT substr(payload, :from, :count) FROM redo_snapshot WHERE slot = 1") suspend fun payloadPart(from: Int, count: Int): String?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun snapshot(row: RedoSnapshotRow)

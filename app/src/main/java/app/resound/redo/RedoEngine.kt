@@ -105,7 +105,7 @@ internal class RedoEngine(
         val refs = "SELECT id FROM transcript_lines WHERE segmentId IN (${s.segments.map { it.segment.id }.sqlIds()})"
         put("memory_items", "eventId IN (${s.events.map { it.id }.sqlIds()}) OR lineId IN ($refs) OR doneHintLineId IN ($refs)")
         put("transcript_lines", "segmentId IN (${s.segments.map { it.segment.id }.sqlIds()}) OR eventId IN (${s.events.map { it.id }.sqlIds()})")
-        if (scope.transcribes) {
+        run {
             put("segments", "id IN (${s.segments.map { it.segment.id }.sqlIds()})")
             put("whole_transcripts", "segmentId IN (${s.segments.map { it.segment.id }.sqlIds()})")
         }
@@ -115,8 +115,9 @@ internal class RedoEngine(
     private fun mergeSelectors(events: List<MemoryEventEntity>, lines: List<TranscriptLineEntity>, span: RedoRange): Map<String, String> =
         linkedMapOf<String, String>().apply {
             put("memory_events", "id IN (${events.map { it.id }.sqlIds()})")
-            put("memory_items", "eventId IN (${events.map { it.id }.sqlIds()})")
+            put("memory_items", "eventId IN (${events.map { it.id }.sqlIds()}) OR lineId IN (${lines.map { it.id }.sqlIds()}) OR doneHintLineId IN (${lines.map { it.id }.sqlIds()})")
             put("transcript_lines", "id IN (${lines.map { it.id }.sqlIds()})")
+            put("whole_transcripts", "segmentId IN (${lines.map { it.segmentId }.sqlIds()})")
             put("skill_cards", cardWhere(listOf(span)))
         }
 
@@ -349,7 +350,8 @@ internal class RedoEngine(
     suspend fun undo(id: String): Result<Unit> = try {
         db.writeTransaction {
             val row = dao.fullSnapshot() ?: error("撤销快照已失效")
-            check(row.jobId == id && now() - row.at < 86_400_000) { "只能撤销一天内最近一次重做" }
+            check(row.applied) { "重做尚未生效，不能撤销" }
+            check(row.jobId == id && now() - row.at in 0 until 86_400_000) { "只能撤销一天内最近一次重做" }
             val payload = JSONObject(row.payload); val after = payload.getJSONObject("after"); val before = payload.getJSONObject("before")
             check(snapshots.unchanged(after)) { "记录在重做后又有变化，无法安全撤销" }
             snapshots.delete(after)
