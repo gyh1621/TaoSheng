@@ -57,9 +57,10 @@ class NetLlmClient(private val client: HttpClient, private val bases: List<Strin
                 val result = client.consume("$base/chat/completions", selectedHeaders, body.toString().encodeToByteArray()) { response ->
                     if (response.status.value in setOf(404, 405) && index < bases.lastIndex) return@consume null
                     trace?.http(response.status.value)
-                    val raw = response.bodyAsText(); trace?.content(raw)
+                    val raw = response.bodyAsText()
+                    if (response.status.value in 200..299) trace?.content(raw)
                     val json = runCatching { Obj(raw) }.onFailure {
-                        FailureNotes.record("net/NetLlmClient.kt:43", it)
+                        if (response.status.value in 200..299) FailureNotes.record("net/NetLlmClient.kt:43", it)
                     }.getOrNull()
                     val usage = json?.optJSONObject("usage")?.let { NetReply("", it.optLong("prompt_tokens"), it.optLong("completion_tokens")) }
                     if (response.status.value !in 200..299) throw httpError(response.status.value, usage, raw)
@@ -92,10 +93,9 @@ class NetLlmClient(private val client: HttpClient, private val bases: List<Strin
                     if (status in setOf(404, 405) && index < bases.lastIndex) return@consume null
                     trace?.http(status)
                     if (status !in 200..299) {
-                        runCatching { Obj(response.bodyAsText()).optJSONObject("usage") }.onFailure {
-                            FailureNotes.record("net/NetLlmClient.kt:75", it)
-                        }.getOrNull()?.let { onUsage(it.optLong("prompt_tokens"), it.optLong("completion_tokens")) }
-                        throw httpError(status)
+                        val raw = runCatching { response.bodyAsText() }.getOrDefault("")
+                        runCatching { Obj(raw).optJSONObject("usage") }.getOrNull()?.let { onUsage(it.optLong("prompt_tokens"), it.optLong("completion_tokens")) }
+                        throw httpError(status, raw = raw)
                     }
                     val context = currentCoroutineContext()
                     val parser = NetSseParser({ context.ensureActive(); onText(it) }, onUsage, trace)
@@ -141,7 +141,12 @@ class NetLlmClient(private val client: HttpClient, private val bases: List<Strin
                 }
                 return NetLlmException(NetLlmError.Server, status, detail, usage)
             }
-            return NetLlmException(when(status) { 401,403 -> NetLlmError.Auth; 402 -> NetLlmError.Quota; 429 -> NetLlmError.RateLimit; else -> NetLlmError.Server }, status, usage = usage)
+            if (status == 429) {
+                // 卡 220：429 不一定是“太频繁”：智谱免费模型并发 1、模型过载、欠费都回 429，读出错误码说清楚
+                val (type, detail) = rateLimitReason(raw)
+                return NetLlmException(type, status, detail, usage)
+            }
+            return NetLlmException(when(status) { 401,403 -> NetLlmError.Auth; 402 -> NetLlmError.Quota; else -> NetLlmError.Server }, status, usage = usage)
         }
     }
 }

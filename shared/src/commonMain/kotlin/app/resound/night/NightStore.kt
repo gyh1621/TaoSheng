@@ -81,7 +81,7 @@ class NightStore(val db: CaptureDatabase,private val scope: CoroutineScope,initi
         val row=dao.get(id) ?: return null
         val clips=dao.clips(id).associateBy { it.id }
         val rows=dao.events(id)
-        val all=rows.map { r->json.decodeFromString<NightEvent>(r.payload).copy(id=r.id,audioAvailable=clips[json.decodeFromString<NightEvent>(r.payload).clipId]?.path?.let { available(it) }==true) }
+        val all=rows.map { r->json.decodeFromString<NightEvent>(r.payload).copy(id=r.id,audioAvailable=clips[json.decodeFromString<NightEvent>(r.payload).clipId]?.takeUnless { it.audioExpired(now()) }?.path?.let { available(it) }==true) }
         // 卡 213：起床后、入睡前、醒着时的“很响的一下”不显示
         val times=summary(row).times;val awake=all.filter { it.kind==NightEventKind.Awake }.map { NightSpan(it.start,it.end) }
         val events=all.filter { NightRules.loudWhileAsleep(it,times,awake) }
@@ -154,7 +154,7 @@ class NightStore(val db: CaptureDatabase,private val scope: CoroutineScope,initi
     suspend fun expire(at: Long)=gate.withLock {
         db.writeTransaction { for(c in dao.expired(at)) { c.path?.let { db.privacy().queueCleanup(PrivacyFileCleanup(fileRef(it).id)) };dao.updateClip(c.copy(path=null));dao.get(c.nightId)?.let { dao.update(it.copy(updatedAt=at)) } } };cleanup()
     }
-    override suspend fun audio(clipId: Long): FileRef? = dao.clip(clipId)?.path?.takeIf { available(it) }?.let(fileRef)
+    override suspend fun audio(clipId: Long): FileRef? = dao.clip(clipId)?.takeUnless { it.audioExpired(now()) }?.path?.takeIf { available(it) }?.let(fileRef)
     suspend fun persistSession(id: Long,session: NightSession,end: Long,state: NightState) {
         dao.get(id)?.let { dao.update(it.copy(end=end,state=state.name,signals=json.encodeToString(session),payload=json.encodeToString(summary(it).copy(state=state,modes=session.modes)),updatedAt=now())) }
     }
@@ -201,10 +201,11 @@ class NightStore(val db: CaptureDatabase,private val scope: CoroutineScope,initi
         val wake=signals.lastOrNull { it.kind=="wake" }?.value?.toLong() ?: row.end
         val segments=db.capture().segments(row.start,row.end).first().filter { it.importRecordId==null && it.startAt<wake }
         val existing=dao.events(id).filter { it.kind=="SleepTalk" }
-        val alive=segments.map { it.id }.toSet()
+        // 媒体会话没有扬声器路由证据：耳机播放不能否决真实说话。
+        val talks=segments.filter { s-> s.playbackMillis<=0 && NightRules.sleepTalk(s.startAt,s.endAt,signals) }
+        val alive=talks.map { it.id }.toSet()
         existing.filter { json.decodeFromString<NightEvent>(it.payload).segmentId !in alive }.forEach { dao.deleteEvent(it.id) }
-        for(segment in segments) {
-            if(segment.playbackMillis>0 || !NightRules.sleepTalk(segment.startAt,segment.endAt,signals))continue
+        for(segment in talks) {
             val lines=db.voiceprint().lines(segment.id)
             val event=NightEvent(0,NightEventKind.SleepTalk,segment.startAt,segment.endAt,segmentId=segment.id,
                 text=lines.takeIf { it.isNotEmpty() }?.joinToString(" ") { it.text },mine=lines.isNotEmpty() && lines.all { it.speakerPersonId==0L })
@@ -215,3 +216,7 @@ class NightStore(val db: CaptureDatabase,private val scope: CoroutineScope,initi
     suspend fun notifyPrivacyChanged() = privacyChanged()
     fun notifyChanged()=changed()
 }
+
+/** 与 expired 查询一致：确认片段按起点保留 90 天，其他按反馈后的 expiresAt。 */
+internal fun NightClipRow.audioExpired(at: Long): Boolean =
+    if (confirmed) start <= at - 7_776_000_000L else expiresAt <= at

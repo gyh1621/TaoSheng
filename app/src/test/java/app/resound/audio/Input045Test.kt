@@ -66,6 +66,8 @@ class Input045Test {
         BackupSettings.capture(context,dir) { _,_ -> "" }
         InputPreferences(prefs).write(InputChoice.AutoExternal)
         assertEquals(InputChoice.AutoExternal,InputPreferences(prefs).read())
+        InputPreferences(prefs).write(InputChoice.AutoWithBluetooth)
+        assertEquals(InputChoice.AutoWithBluetooth,InputPreferences(prefs).read())
         BackupSettings.apply(context,dir) { _,_,_ -> }
         assertEquals(chosen,InputPreferences(prefs).read())
     }
@@ -135,6 +137,31 @@ class Input045Test {
             snapshots.value = InputSnapshot(InputChoice.AutoExternal,listOf(usb,wired))
             assertNull(withTimeoutOrNull(100) { started.receive() })
         } finally { task.cancelAndJoin() }
+    }
+
+    @Test fun bluetoothPermissionFailureKeepsChoiceAndRecoversAfterReconnect() = runBlocking {
+        val bt=InputRoute(InputDevice("synthetic-bt","合成耳机",InputKind.BluetoothLe,true),30)
+        val snapshots=MutableStateFlow(InputSnapshot(InputChoice.AutoWithBluetooth,listOf(bt)))
+        val started=Channel<String>(Channel.UNLIMITED);var allowed=false;var now=0L
+        val task=launch {
+            InputSwitchLoop(snapshots,{now}).run {route,_->
+                if(route.device.kind==InputKind.BluetoothLe && !allowed)
+                    throw AudioSourceException(AudioSourceException.Reason.NoPermission)
+                started.send(route.device.key);awaitCancellation()
+            }
+        }
+        try {
+            assertEquals("mic",withTimeout(2000) {started.receive()})
+            assertEquals(InputChoice.AutoWithBluetooth,snapshots.value.choice)
+            snapshots.value=InputSnapshot(InputChoice.AutoWithBluetooth,emptyList());yield()
+            allowed=true;now=3001
+            snapshots.value=InputSnapshot(InputChoice.AutoWithBluetooth,listOf(bt.copy(portId=31)))
+            assertEquals(bt.device.key,withTimeout(2000) {started.receive()})
+            // 撤销/失去端口后回手机，不改保存的路由选择。
+            snapshots.value=InputSnapshot(InputChoice.AutoWithBluetooth,emptyList())
+            assertEquals("mic",withTimeout(2000) {started.receive()})
+            assertEquals(InputChoice.AutoWithBluetooth,snapshots.value.choice)
+        } finally {task.cancelAndJoin()}
     }
 
     @Test fun ownBluetoothModeIsNotCountedAsCallButRingingAndCallsAre() {

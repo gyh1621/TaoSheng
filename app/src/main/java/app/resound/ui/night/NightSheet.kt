@@ -297,6 +297,7 @@ private fun BreakCheck(e: NightEvent) {
             !hasAudio -> "${clock(e.start)} 录音已过期"
             else -> "${clock(e.start)} 这段是鼾声中断吗？"
         }, style = RsType.subhead, color = c.textSecondary, modifier = Modifier.weight(1f))
+        if (hasAudio) { ExportPill(e, false); Spacer(Modifier.width(8.dp)) }
         if (hasAudio) when (e.feedback) {
             Feedback.Yes -> Text("已确认 ✓", style = RsType.caption, color = c.good)
             else -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -334,6 +335,7 @@ private fun EventRow(e: NightEvent, d: NightDetail, sharedRoom: Boolean, on: Boo
     val scope = rememberCoroutineScope()
     val playing = e.clipId != null && app.resound.ui.voiceprint.SamplePlayer.playingKey == clipKey(e.clipId!!)
     val tint = if (dim) c.textTertiary else kindColor(e.kind)
+    Column(Modifier.fillMaxWidth()) {
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
         .background(if (on) c.accentSoft else Color.Transparent).springClick { onFocus(e) }.padding(horizontal = 6.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically) {
@@ -376,7 +378,11 @@ private fun EventRow(e: NightEvent, d: NightDetail, sharedRoom: Boolean, on: Boo
             }
         }
     }
+    // 卡 220：点中的那段有录音就能导出，标没标、是什么都行
+    if (on && e.clipId != null && e.audioAvailable) ExportClip(e, sharedRoom)
+    }
 }
+
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -431,6 +437,38 @@ private fun Dreams(d: NightDetail) {
             Text(clock(dream.at), style = RsType.subhead, color = c.textTertiary)
             Text("  " + (dream.text ?: if (dream.transcribing) "转写中…" else "（没听到内容）"), style = RsType.body, color = c.text, modifier = Modifier.weight(1f))
             Text("删", style = RsType.caption, color = c.textTertiary, modifier = Modifier.springClick { scope.launch { AppGraph.nightInsights.deleteDream(dream.id) } }.padding(horizontal = 8.dp))
+        }
+    }
+}
+
+/** 卡 220：选中一段后出现：哪天删、导出成 m4a 发出去或存到文件 */
+@Composable
+private fun ExportClip(e: NightEvent, sharedRoom: Boolean) {
+    val c = Rs.colors
+    Row(Modifier.fillMaxWidth().padding(start = 56.dp, end = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("导出不延长原片保留期；已保存或分享的副本需自行删除", style = RsType.caption, color = c.textTertiary, modifier = Modifier.weight(1f))
+        ExportPill(e, sharedRoom)
+    }
+}
+
+@Composable
+private fun ExportPill(e: NightEvent, sharedRoom: Boolean) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var state by remember(e.id) { mutableStateOf<String?>(null) }
+    Pill(when (state) { "making" -> "准备中…"; "gone" -> "录音已删"; "failed" -> "重试"; else -> "导出" }, filled = false) {
+        val clip = e.clipId ?: return@Pill
+        if (state == "making" || state == "gone") return@Pill
+        state = "making"
+        scope.launch {
+            val at = java.time.Instant.ofEpochMilli(e.start).atZone(java.time.ZoneId.systemDefault())
+            val name = "${kindTitle(e, sharedRoom)} ${at.monthValue}月${at.dayOfMonth}日 %02d点%02d分".format(at.hour, at.minute)
+            val r = runCatching { AppGraph.nightInsights.exportClip(clip, name) }
+            state = when {
+                r.isFailure -> "failed"
+                r.getOrNull() == null -> "gone"
+                else -> { share(context, listOf(File(r.getOrNull()!!.id)), "audio/mp4", "导出这段录音"); null }
+            }
         }
     }
 }
