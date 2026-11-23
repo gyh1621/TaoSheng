@@ -28,7 +28,8 @@ class AndroidDigestSettings internal constructor(
     private val preferences = DigestPreferenceStore(prefs::getBoolean, prefs::getInt,
         { context.getSharedPreferences("transcribe", Context.MODE_PRIVATE).getInt("interval", 30) },
         { key, value -> prefs.edit().putBoolean(key, value).commit() },
-        { key, value -> prefs.edit().putInt(key, value).commit() })
+        { key, value -> prefs.edit().putInt(key, value).commit() },
+        { context.packageManager.getPackageInfo(context.packageName, 0).let { it.firstInstallTime == it.lastUpdateTime } })
     override val includeSituation get() = preferences.includeSituation
     override fun setIncludeSituation(on: Boolean) = preferences.setIncludeSituation(on)
     override val includeAppPlayback get() = preferences.includeAppPlayback
@@ -42,6 +43,8 @@ class AndroidDigestSettings internal constructor(
         set(value) { preferences.onIntervalChanged = value }
     fun setIntervalMinutes(value: Int) = preferences.setIntervalMinutes(value)
     fun setDeepThinking(on: Boolean) = preferences.setDeepThinking(on)
+    val deepThinkingNotice get() = preferences.deepThinkingNotice
+    fun dismissDeepThinkingNotice() = preferences.dismissDeepThinkingNotice()
     fun setPauseMinutes(value: Int) = preferences.setPauseMinutes(value)
     fun setMaxWaitMinutes(value: Int) = preferences.setMaxWaitMinutes(value)
     /** 整理和重新整理用的请求：按开关决定模型要不要先思考 */

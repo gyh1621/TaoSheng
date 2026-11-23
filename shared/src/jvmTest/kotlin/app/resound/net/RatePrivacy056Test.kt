@@ -1,3 +1,4 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 package app.resound.net
 
 import app.resound.digest.LlmPreset
@@ -6,6 +7,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.*
 import io.ktor.http.*
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -14,7 +16,10 @@ class RatePrivacy056Test {
         val secret = "SYNTHETIC_SECRET https://synthetic.invalid/?signature=secret prompt=private"
         for (raw in listOf("""{"error":{"message":"quota $secret"}}""", "{broken $secret")) {
             for (mode in 0..3) {
-                val client = HttpClient(MockEngine { respond(raw, HttpStatusCode.TooManyRequests) })
+                val client = HttpClient(MockEngine(MockEngineConfig().apply {
+                    dispatcher = StandardTestDispatcher(testScheduler)
+                    addHandler { respond(raw, HttpStatusCode.TooManyRequests) }
+                }))
                 val seen = mutableListOf<String>()
                 val trace = object : NetworkTrace {
                     override fun http(status: Int) { assertEquals(429,status) }

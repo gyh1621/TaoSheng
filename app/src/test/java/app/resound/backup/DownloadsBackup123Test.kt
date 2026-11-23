@@ -76,7 +76,7 @@ class DownloadsBackup123Test {
     @Test fun downloadsBackupListsAndRestoresSelectedPointWithSettings() = runBlocking {
         val repo = repository()
         repo.useDownloadsFolder()
-        assertEquals("下载/备份", repo.local.value.folder)
+        assertEquals(DownloadsBackupFiles.LABEL, repo.local.value.folder)
         assertEquals(LocalFolderAccess.Ok, repo.local.value.folderAccess)
         assertFalse(repo.local.value.sessionOnly)
         repo.setLocalAuto(true)
@@ -93,7 +93,7 @@ class DownloadsBackup123Test {
         db.testSql.query("SELECT title FROM ask_conversations WHERE id=1").use {
             assertTrue(it.moveToFirst()); assertEquals("before", it.getString(0))
         }
-        assertEquals("下载/备份", repository().local.value.folder)
+        assertEquals(DownloadsBackupFiles.LABEL, repository().local.value.folder)
         assertTrue(repository().local.value.auto)
     }
     @Test fun retentionDeletesOnlyOwnedRecognizedFiles() = runBlocking {
@@ -135,12 +135,40 @@ class DownloadsBackup123Test {
         assertEquals(treeFolder.name, restored.local.value.folder)
         assertEquals(LocalFolderAccess.Ok, restored.local.value.folderAccess)
     }
+    @Test fun unconfiguredDisabledManualAndRestoredChoicesNeverEnableOnRestart() {
+        val prefs=context.getSharedPreferences("backup",0)
+        assertFalse(repository().local.value.auto);assertFalse(repository().local.value.downloads)
+        assertFalse(prefs.contains("localAuto"));assertFalse(prefs.contains("localDownloads"))
+        prefs.edit().putBoolean("localAuto",false).commit()
+        assertFalse(repository().local.value.auto)
+        val manual=repository();manual.useDownloadsFolder()
+        assertFalse(repository().local.value.auto)
+        val captured=work();BackupSettings.capture(context,captured)
+        manual.setLocalAuto(true);assertTrue(repository().local.value.auto)
+        BackupSettings.apply(context,captured)
+        assertFalse(repository().local.value.auto);assertTrue(repository().local.value.downloads)
+        assertEquals(DownloadsBackupFiles.LABEL,repository().local.value.folder)
+    }
+    @Test fun defaultBackup223LeavesConfiguredUsersAlone() {
+        val prefs = context.getSharedPreferences("backup", 0)
+        prefs.edit().putBoolean("enabled", true).commit()
+        val repo = repository()
+        assertFalse(repo.local.value.downloads); assertFalse(repo.local.value.auto); assertNull(repo.local.value.folder)
+        assertFalse(prefs.getBoolean(AndroidBackupRepository.DEFAULT_NOTICE, false))
+    }
+    @Test fun legacyDownloadsInstallationKeepsOldFolder() {
+        File(context.noBackupFilesDir, "downloads-backup-folder").delete()
+        File(context.noBackupFilesDir, "downloads-backup-installation").writeText("12345678-1234-1234-1234-123456789abc")
+        assertEquals("Download/备份/12345678-1234-1234-1234-123456789abc/", DownloadsBackupFiles(context).rootPath)
+        assertEquals(DownloadsBackupFiles.LABEL, DownloadsBackupFiles.label(context))
+    }
     @Test fun newInstallationSeesEmptyListWithoutError() = runBlocking {
         val repo = repository().apply { useDownloadsFolder() }
         repo.runLocalBackup(false); assertTrue(repo.localBackups().getOrThrow().isNotEmpty())
         // 系统卸载后撤销旧安装文件的所有权，文件本身仍留在下载目录。
         provider.forgetOwners()
         File(context.noBackupFilesDir, "downloads-backup-installation").delete()
+        File(context.noBackupFilesDir, "downloads-backup-folder").delete()
         val fresh = repository()
         assertTrue(fresh.localBackups().getOrThrow().isEmpty())
         assertNull(fresh.localSummary().getOrThrow()); assertNull(fresh.local.value.lastError)
@@ -202,7 +230,7 @@ class DownloadsBackup123Test {
         assertTrue(log.contains("resolve-directory IllegalStateException provider bridge rejected"))
         assertFalse(log.contains(address)); assertFalse(log.contains("short-key")); assertFalse(log.contains("abc123456"))
         assertFalse(log.contains("/storage")); assertTrue(BackupDiagnostics.safeReason(IllegalStateException(message)).length <= 200)
-        assertEquals("这个文件夹在本机用不了，可以改存到“下载/备份”", repo.local.value.lastError)
+        assertEquals("这个文件夹在本机用不了，可以改存到“Download（下载）/TaoSheng”", repo.local.value.lastError)
     }
 }
 

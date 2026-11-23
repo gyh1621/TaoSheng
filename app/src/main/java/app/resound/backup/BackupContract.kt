@@ -204,6 +204,8 @@ data class LocalBackupState(
     val folderAccess: LocalFolderAccess? = null,
     /** 仅本次进程可用；重启后必须重新选择文件夹。 */
     val sessionOnly: Boolean = false,
+    /** 存在 Download 里的固定位置（不用选文件夹），见 [DownloadsBackupFiles] */
+    val downloads: Boolean = false,
 )
 
 /** null 状态表示尚未选文件夹；Ok 也可能仅为当前进程授权，见 sessionOnly。 */

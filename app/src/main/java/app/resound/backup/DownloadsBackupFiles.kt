@@ -117,6 +117,7 @@ internal class DownloadsBackupFiles(private val context: Context) : VolumeStore 
     companion object {
         const val ROOT = "Download/备份/"
         const val LABEL = "下载/备份"
+        fun label(context: Context): String = LABEL
         @Synchronized private fun installationRoot(context: Context): String {
             val file = File(context.noBackupFilesDir, "downloads-backup-installation")
             val id = if (file.exists()) file.readText() else UUID.randomUUID().toString().also { file.writeText(it) }

@@ -13,6 +13,8 @@ class DigestPreferenceStore(
     legacyInterval: () -> Int,
     private val saveBoolean: (String, Boolean) -> Boolean,
     private val saveInt: (String, Int) -> Boolean,
+    /** 是否全新安装（不是从旧版升级上来）；新装的不用提示“已为你打开先思考” */
+    newInstall: () -> Boolean = { false },
 ) {
     private val _includeSituation = MutableStateFlow(readBoolean("includeSituation", false))
     val includeSituation = _includeSituation.asStateFlow()
@@ -44,7 +46,10 @@ class DigestPreferenceStore(
         val v = value.coerceIn(MIN_INTERVAL, MAX_INTERVAL)
         check(saveInt("interval", v)); _intervalMinutes.value = v; onIntervalChanged()
     }
-    /** 整理前先让模型思考：分条更准，但费用约为原来的 3～5 倍；默认关 */
+    // 不迁移开启付费思考；未设置沿用关闭，显式选择保持原样。
+    private val _deepThinkingNotice = MutableStateFlow(false)
+    val deepThinkingNotice = _deepThinkingNotice.asStateFlow()
+    fun dismissDeepThinkingNotice() { _deepThinkingNotice.value = false }
     private val _deepThinking = MutableStateFlow(readBoolean("deepThinking", false))
     val deepThinking = _deepThinking.asStateFlow()
     fun setDeepThinking(on: Boolean) { check(saveBoolean("deepThinking", on)); _deepThinking.value = on }

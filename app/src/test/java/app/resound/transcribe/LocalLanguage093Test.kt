@@ -32,14 +32,16 @@ class LocalLanguage093Test {
         assertEquals(LocalAsrLanguage.Chinese, AndroidTranscribeSettings(context).language.value)
     }
 
-    @Test fun unknownStoredLanguageFallsBackAndDoesNotAffectCloudIdentity() {
+    @Test fun unknownStoredLanguageFallsBackAndInvalidatesForkSnapshotWithoutChangingProvider() {
         val context = RuntimeEnvironment.getApplication()
-        context.getSharedPreferences("transcribe", 0).edit().putString("localLanguage", "unknown").commit()
+        // 定制版标识覆盖所有双版请求配置；修改语言撤销旧快照，但不改变选定的云端提供方。
+        context.getSharedPreferences("transcribe", 0).edit().putString("localLanguage", "unknown").putString("source", "Doubao").commit()
         val settings = AndroidTranscribeSettings(context)
         assertEquals(LocalAsrLanguage.Auto, settings.language.value)
         val before = settings.identity()
         settings.setLanguage(LocalAsrLanguage.English)
-        assertEquals(before, settings.identity())
+        assertNotEquals(before, settings.identity())
+        assertEquals(TranscribeSource.Doubao,settings.source.value)
     }
 
     @Test fun bothBackendsReceiveSelectedLanguageAndInvalidateModelCacheOnChange() {

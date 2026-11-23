@@ -21,6 +21,7 @@ class TranscribePreferenceStore(
     private val clearNpuCheck: () -> Unit,
     private val sourceChanged: () -> Unit, private val refreshReady: () -> Unit,
     private val validateAlignment: (String) -> Unit = {},
+    hasCloudKey: () -> Boolean = { false },
 ) {
     private val _source = MutableStateFlow(runCatching { TranscribeSource.valueOf(readString("source", "Doubao")!!) }.onFailure {
         FailureNotes.record("transcribe/TranscribePreferenceStore.kt:25", it)
