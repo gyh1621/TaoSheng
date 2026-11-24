@@ -53,7 +53,7 @@ internal class LlmProblemDiagnostics(
                     LlmPreset(it.optString("id"), "", "", it.optString("model"))) }
                 appendLine("问问程序先查=${ask?.fallback != null} 标记原因=${ask?.fallback?.reason?.human ?: "暂无"} 时间=${LlmDiagnostics.stamp(ask?.fallback?.at ?: 0)}")
                 appendLine("上次实际问答失败=${ask?.lastFailure?.reason?.human ?: "暂无"} 时间=${LlmDiagnostics.stamp(ask?.lastFailure?.at ?: 0)}")
-                appendLine("备用切换=${context.getSharedPreferences("digest", 0).getBoolean("failoverEnabled", true)}")
+                appendLine("备用切换=${context.getSharedPreferences("digest", 0).getBoolean("failoverEnabled", false)}")
                 append("备用列表（已保存的其他配置）：")
                 append(saved.filter { it != primary }.joinToString("；") { "${it.optString("name")} / ${it.optString("model")}" }.ifBlank { "暂无" })
             }

@@ -230,7 +230,7 @@ class DownloadsBackup123Test {
         assertTrue(log.contains("resolve-directory IllegalStateException provider bridge rejected"))
         assertFalse(log.contains(address)); assertFalse(log.contains("short-key")); assertFalse(log.contains("abc123456"))
         assertFalse(log.contains("/storage")); assertTrue(BackupDiagnostics.safeReason(IllegalStateException(message)).length <= 200)
-        assertEquals("这个文件夹在本机用不了，可以改存到“Download（下载）/TaoSheng”", repo.local.value.lastError)
+        assertEquals("这个文件夹在本机用不了，可以改存到“下载/备份”", repo.local.value.lastError)
     }
 }
 

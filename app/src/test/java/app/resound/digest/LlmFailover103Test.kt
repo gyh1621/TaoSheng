@@ -42,6 +42,7 @@ class LlmFailover103Test {
         val id = providers.saveNow(null, null, "主", "https://fixture.invalid/v1", "primary", "fixture", "", "")
         primary = providers.credentials(id).first
         failover = LlmFailover(context, providers) { time }
+        failover.setEnabled(true)
     }
     private fun backup(model: String = "backup", template: String? = null): LlmPreset {
         val id = providers.saveNow(null, template, model, "https://fixture.invalid/v1", model, "fixture", "", "")
@@ -235,7 +236,7 @@ class LlmFailover103Test {
                     LlmReply("""{"events":[{"from":1,"to":1,"scene":"工作","title":"合成","summary":"合成"}],"items":[]}""", 20, 3)
                 })
             val live = runner(); assertTrue(live.run(force = true))
-            val pending = db.memory().pendingDigests().single(); assertTrue(pending.id.startsWith("batch-v2:"))
+            val pending = db.memory().pendingDigests().single(); assertTrue(pending.id.startsWith("batch-dual-v1:"))
             state.edit().putString("inflight", pending.id).putString("inflight-lines", "1").commit()
             failSave = false; assertFalse(live.run(force = true)); assertFalse(runner().run(force = true))
             assertEquals(2, calls); assertTrue(db.memory().pendingDigests().isEmpty())

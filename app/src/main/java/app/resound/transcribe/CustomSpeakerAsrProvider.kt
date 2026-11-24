@@ -19,7 +19,9 @@ class CustomSpeakerAsrProvider(
     private val remote: AsrProvider,
 ) : AsrProvider {
     override suspend fun recognize(audio: AsrAudio, key: String, beforeAudio: suspend () -> Unit): AsrResult = withContext(Dispatchers.IO) {
-        fun status(value: String) { settings.setLocalStatus(value); app.resound.PipelineProgress.detail(value) }
+        val request = Any()
+        fun status(value: String) { settings.setLocalStatus(request, value); app.resound.PipelineProgress.detail(value) }
+        try {
         status("自定义转写：准备音频")
         val pcm = audio.pcmFile?.takeIf { it.isFile }?.let(::readPcm16) ?: AsrAudioReader(context.cacheDir).readPcm(audio.file)
         currentCoroutineContext().ensureActive()
@@ -80,6 +82,7 @@ class CustomSpeakerAsrProvider(
         }
         status("切分转写完成：${fine}/${chunks.size} 段已精细对齐" + if (fallback.isNotBlank()) "；$fallback" else "")
         AsrResult(output, pcm.size / 16L, null, inputTokens, outputTokens)
+        } finally { settings.clearLocalStatus(request) }
     }
 
     private suspend fun align(audio: AsrAudio, text: String, key: String): List<AsrSentence> {

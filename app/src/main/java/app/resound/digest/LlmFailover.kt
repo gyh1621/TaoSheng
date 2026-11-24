@@ -27,7 +27,7 @@ class LlmFailover(
 ) {
     private val diagnostics = LlmDiagnostics(context)
     private val prefs = context.getSharedPreferences("digest", Context.MODE_PRIVATE)
-    private val mutableEnabled = MutableStateFlow(prefs.getBoolean("failoverEnabled", true))
+    private val mutableEnabled = MutableStateFlow(prefs.getBoolean("failoverEnabled", false))
     val enabled = mutableEnabled.asStateFlow()
     private val recent = MutableStateFlow<LlmSwitch?>(null)
     val latestSwitch = recent.asStateFlow()
@@ -75,6 +75,7 @@ class LlmFailover(
             LlmError.Quota -> "余额不足或额度用完"
             LlmError.RateLimit -> "请求太频繁"
             LlmError.Network -> "网络连接失败"
+            LlmError.TooSlow -> if (error.silent) "模型长时间没有响应" else "模型响应太慢"
             else -> "模型服务出错"
         }
         else -> "模型服务出错"
@@ -91,7 +92,7 @@ class LlmFailover(
         classify = { e -> classify(e, splits = true) },
         safeCoolingError = { e -> (e as LlmException).let { LlmException(it.type, it.status, it.detail) } },
         exhausted = { e, suffix -> when (e) {
-            is LlmException -> LlmException(e.type, e.status, e.detail + suffix)
+            is LlmException -> LlmException(e.type, e.status, e.detail + suffix, silent = e.silent)
             is LlmInputLimitException -> LlmInputLimitException(e.message + suffix)
             else -> e
         } })
@@ -99,7 +100,8 @@ class LlmFailover(
     private fun classify(e: Exception, splits: Boolean): FailoverFailure? = when (e) {
         is LlmInputLimitException -> FailoverFailure(reason(e), capacity = true)
         // 会自己切小的调用：先让业务切小同一批，不冷却或切换模型掩盖自适应错误；其余功能照常切备用模型。
-        is LlmException -> if (splits && e.type in setOf(LlmError.TooSlow, LlmError.Truncated)) null else FailoverFailure(reason(e), format = e.type == LlmError.Format,
+        // 卡 226：超时前一个字都没输出（silent）是服务卡住，切小没用，任何调用都直接换备用模型。
+        is LlmException -> if (splits && e.type in setOf(LlmError.TooSlow, LlmError.Truncated) && !e.silent) null else FailoverFailure(reason(e), format = e.type == LlmError.Format,
             rejected = e.rejected, longCooling = e.type in setOf(LlmError.Auth, LlmError.Quota))
         else -> null
     }
@@ -116,7 +118,7 @@ class LlmFailover(
         val on = enabled.value && canSwitch()
         val context = kotlin.coroutines.coroutineContext
         val splits = context[LlmSplitsOnSlow.Key] != null || context[app.resound.topic.core.TopicRequestContext] != null
-        return rules.execute(primary, candidates(primary, key, on), on, canSwitch, switched = { p, reason ->
+        return rules.execute(primary, candidates(primary, key, on), on, { enabled.value && canSwitch() }, switched = { p, reason ->
             recent.value = LlmSwitch(now(), feature, primary.name + " / " + primary.model, p.name + " / " + p.model, reason)
             recent.value?.let { diagnostics.switched(it.at, it.originalModel, it.actualModel, it.reason) }
         }, classifyHere = { e -> classify(e, splits) }) { candidate ->
