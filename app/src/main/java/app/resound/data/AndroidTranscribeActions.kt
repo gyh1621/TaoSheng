@@ -21,13 +21,37 @@ suspend fun TranscribeDao.ignoreFailed() = ignoreFailed(System.currentTimeMillis
 
 suspend fun TranscribeDao.completeRedo(row: SegmentEntity, fresh: List<TranscriptLineEntity>, at: Long) = transaction {
         val old = linesForRedo(row.id)
-        val used = mutableSetOf<Long>()
-        val mapped = fresh.map { line ->
-            val match = old.filter { it.id !in used }.maxByOrNull {
-                (minOf(it.endAt, line.endAt) - maxOf(it.startAt, line.startAt)).coerceAtLeast(0)
+        data class Candidate(val freshIndex: Int, val oldIndex: Int, val exact: Boolean, val overlap: Long)
+        val candidates = buildList {
+            fresh.forEachIndexed { fi, line ->
+                old.forEachIndexed { oi, previous ->
+                    val exact = previous.startAt == line.startAt && previous.endAt == line.endAt
+                    val overlap = minOf(previous.endAt, line.endAt) - maxOf(previous.startAt, line.startAt)
+                    if (exact || overlap > 0) add(Candidate(fi, oi, exact, overlap))
+                }
             }
-            match?.let { used += it.id }
-            line.copy(id = match?.id ?: 0, eventId = match?.eventId, digestedAt = match?.digestedAt ?: at)
+        }.sortedWith(compareByDescending<Candidate> { it.exact }.thenByDescending { it.overlap }
+            .thenBy { it.freshIndex }.thenBy { it.oldIndex })
+        val matches = arrayOfNulls<Int>(fresh.size)
+        val used = BooleanArray(old.size)
+        for ((fi, oi) in candidates) {
+            if (matches[fi] == null && !used[oi]) {
+                matches[fi] = oi
+                used[oi] = true
+            }
+        }
+        fresh.indices.filter { matches[it] == null }.zip(old.indices.filterNot { used[it] }).forEach { (fi, oi) ->
+            matches[fi] = oi
+        }
+        val mapped = fresh.mapIndexed { fi, line ->
+            val match = matches[fi]?.let { old[it] }
+            val mappedLine = line.copy(id = match?.id ?: 0, eventId = match?.eventId, digestedAt = match?.digestedAt ?: at)
+            if (match == null || !match.speakerManual) return@mapIndexed mappedLine
+            val ov = minOf(match.endAt, line.endAt) - maxOf(match.startAt, line.startAt)
+            val exact = match.startAt == line.startAt && match.endAt == line.endAt
+            val substantial = ov > 0 && ov * 2 >= maxOf(match.endAt - match.startAt, line.endAt - line.startAt)
+            if (exact || substantial) mappedLine.copy(speakerManual = true, speakerName = match.speakerName,
+                speakerPersonId = match.speakerPersonId, speakerScore = match.speakerScore) else mappedLine
         }
         complete(row.copy(redoPending = false), mapped)
         val saved = linesForRedo(row.id)

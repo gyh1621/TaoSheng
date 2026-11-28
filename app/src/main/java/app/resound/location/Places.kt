@@ -98,6 +98,10 @@ class PlaceResolver(
     private val lock = Mutex()
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError
+    /** 地名缓存或手动地点每写一次加一，供足迹实时同步感知补全的地名、改名和“家”。 */
+    private val _revision = MutableStateFlow(0L)
+    val revision: StateFlow<Long> = _revision
+    private fun changed() { _revision.value++ }
 
     suspend fun cached(lat: Double, lng: Double): Place? = with(Places) {
         nearestManual(dao.manualNow(), lat, lng)?.toPlace() ?: dao.get(cell(lat, lng))?.takeIf { it.source != MANUAL }?.toPlace()
@@ -111,8 +115,9 @@ class PlaceResolver(
         if (home) dao.clearHome()
         dao.put(PlaceRow("m:" + String.format(Locale.US, "%.6f,%.6f", lat, lng), name.trim(), address.trim(), Places.MANUAL,
             System.currentTimeMillis(), lat, lng, home))
+        changed()
     }
-    suspend fun removeManual(row: PlaceRow) = dao.delete(row.cell)
+    suspend fun removeManual(row: PlaceRow) { dao.delete(row.cell); changed() }
 
     suspend fun resolve(lat: Double, lng: Double): Place? = lock.withLock {
         cached(lat, lng)?.let { return it }
@@ -127,10 +132,11 @@ class PlaceResolver(
             }
         } ?: return null
         dao.put(PlaceRow(cell, place.name, place.address, place.source, System.currentTimeMillis()))
+        changed()
         place
     }
 
-    suspend fun clearCache() = dao.clear()
+    suspend fun clearCache() { dao.clear(); changed() }
 
     private fun amap(key: String, lat: Double, lng: Double): Place? {
         val (gLat, gLng) = Places.wgsToGcj(lat, lng)

@@ -38,6 +38,10 @@ class TranscribeRunner(
     private val wholeRun: suspend () -> Boolean = { false },
     private val wholePending: suspend () -> Set<Long> = { emptySet() },
     private val topicTraining: suspend (Long) -> Boolean = { false },
+    private val recordStudioDecision: suspend (SegmentEntity, StudioEnvSound, Long) -> Unit = { _, _, _ -> },
+    private val isRestoredOrWrong: suspend (Long) -> Boolean = { false },
+    private val invalidateWhole: suspend (Long) -> Unit = {},
+    private val onStudioUnsyncedSegment: (suspend (SegmentEntity, String?) -> Unit)? = null,
 ) {
     internal var localResume: app.resound.transcribe.local.LocalResumeQueue? = null
 
@@ -96,34 +100,80 @@ class TranscribeRunner(
                 var outcome = "Failed"
                 var error: AsrError? = null
                 var logId: String? = null
+                val configured = provider as? ConfiguredAsrProvider
+                val source = selected ?: configured?.currentSource()
+                var legacy = true
                 try {
-                    if (!File(candidate.path).isFile) throw AsrException(AsrError.Audio, detail = "录音文件已不存在")
-                    if (!candidate.redoPending && heavy.withLock { beforeTranscribe(candidate) } && dao.finishEnvSkip(candidate.id, now()) > 0) {
-                        outcome = "SkippedEnv"
-                        return RoundDecision.Continue
-                    }
-                    wholePrepare(candidate, selected)
+                    val audioFile = File(candidate.path)
+                    if (!audioFile.isFile) throw AsrException(AsrError.Audio, detail = "录音文件已不存在")
                     val training = topicTraining(candidate.startAt)
                     val distinguish = if (training) false else candidate.separateSpeakers ?: separateSpeakers(candidate.startAt)
-                    if (training) dao.topicTraining(candidate.id)
-                    dao.rememberSpeakers(candidate.id, distinguish)
-                    val selectedProvider = if (selected != null && provider is ConfiguredAsrProvider) object : AsrProvider { override suspend fun recognize(audio: AsrAudio, key: String, beforeAudio: suspend () -> Unit) = provider.recognize(selected, audio, key, beforeAudio) } else provider
-                    if (selected == TranscribeSource.Local) localResume?.begin(candidate.id)
-                    suspend fun recognize() = selectedProvider.recognize(AsrAudio(File(candidate.path), File(candidate.path).extension, (candidate.endAt - candidate.startAt).coerceAtLeast(0), separateSpeakers = distinguish, pcmFile = sharedPcm?.find(File(candidate.path)), speakerCount = candidate.speakerCount), credential) {
+                    suspend fun rememberSpeakers() {
+                        if (training) dao.topicTraining(candidate.id)
+                        dao.rememberSpeakers(candidate.id, distinguish)
+                    }
+                    var didReserve = false
+                    suspend fun reserve() {
+                        if (didReserve) return
                         check(dao.findSegment(candidate.id) != null)
                         reserved = (candidate.endAt - candidate.startAt).coerceAtLeast(0)
                         dao.reserveAudio(today(), reserved, candidate.id)
+                        didReserve = true
                     }
-                    val result = if (selected == TranscribeSource.Local || selected == TranscribeSource.Custom) heavy.withLock { recognize() } else recognize()
+                    val studioResult = if (source == TranscribeSource.Custom && configured?.hasStudio() == true) heavy.withLock {
+                        legacy = false
+                        configured.recognizeStudio(source, candidate.asrAudio(distinguish), credential, ::reserve)
+                    } else null
+                    val result = if (studioResult != null) {
+                        rememberSpeakers()
+                        invalidateWhole(candidate.id)
+                        studioResult
+                    } else {
+                        legacy = true
+                        if (!candidate.redoPending && heavy.withLock { beforeTranscribe(candidate) } && dao.finishEnvSkip(candidate.id, now()) > 0) {
+                            outcome = "SkippedEnv"
+                            return RoundDecision.Continue
+                        }
+                        wholePrepare(candidate, selected)
+                        rememberSpeakers()
+                        if (selected == TranscribeSource.Local) localResume?.begin(candidate.id)
+                        suspend fun recognize(): AsrResult {
+                            val audio = candidate.asrAudio(distinguish, sharedPcm?.find(audioFile))
+                            return if (configured != null && source != null) configured.recognizeLegacy(source, audio, credential, ::reserve)
+                            else provider.recognize(audio, credential, ::reserve)
+                        }
+                        if (selected == TranscribeSource.Local || selected == TranscribeSource.Custom) heavy.withLock { recognize() } else recognize()
+                    }
+                    if (result.studioHosted && !result.studioWebhookSynced) {
+                        val enqueue = onStudioUnsyncedSegment ?: throw AsrException(AsrError.Server)
+                        val payload = result.studioSyncPayload ?: throw AsrException(AsrError.Server)
+                        withContext(NonCancellable) {
+                            if (dao.findSegment(candidate.id) != null) enqueue(candidate, payload)
+                        }
+                    } else if (result.studioHosted || candidate.redoPending) {
+                        withContext(NonCancellable) { onStudioUnsyncedSegment?.invoke(candidate, null) }
+                    }
+                    studioResult?.studioEnvSound?.let { sound ->
+                        recordStudioDecision(candidate, sound, (now() - began).coerceAtLeast(0))
+                        if (!candidate.redoPending && sound.skip && !isRestoredOrWrong(candidate.id) && dao.finishEnvSkip(candidate.id, now()) > 0) {
+                            outcome = "SkippedEnv"
+                            return RoundDecision.Continue
+                        }
+                    }
                     withContext(NonCancellable) { dao.recordTokens(today(), result.inputTokens, result.outputTokens) }
                     recordSpeed(selected, (candidate.endAt - candidate.startAt).coerceAtLeast(0), (now() - began).coerceAtLeast(1))
                     logId = TranscribePolicy.safeLogId(result.logId, credential)
                     outcome = if (result.sentences.isEmpty()) "Empty" else "Done"
                     val lines = result.sentences.map { line ->
                         TranscriptLineEntity(segmentId = candidate.id, startAt = candidate.startAt + line.startMillis,
-                            endAt = candidate.startAt + line.endMillis, text = line.text, speakerTag = candidate.importChannel?.takeIf { !distinguish && candidate.speakerCount != 0 }?.let { "channel:$it" } ?: line.speakerTag.takeIf { distinguish }, originalText = line.originalText)
+                            endAt = candidate.startAt + line.endMillis, text = line.text,
+                            speakerTag = if (result.studioHosted) line.speakerTag else candidate.importChannel?.takeIf { !distinguish && candidate.speakerCount != 0 }?.let { "channel:$it" } ?: line.speakerTag.takeIf { distinguish },
+                            originalText = line.originalText, speakerName = line.speakerName, speakerScore = line.speakerScore,
+                            speakerPersonId = line.speakerPersonId)
                     }
-                    dao.findSegment(candidate.id)?.let { current -> val completed = current.copy(status = outcome, completedAt = now(), error = null, nextRetryAt = null, logId = logId, voiceprintProcessedAt = if (distinguish || (candidate.importChannel != null && candidate.speakerCount != 0)) null else now(), firstFailedAt = null)
+                    dao.findSegment(candidate.id)?.let { current -> val completed = current.copy(status = outcome, completedAt = now(), error = null, nextRetryAt = null, logId = if (result.studioHosted) STUDIO_HOSTED_LOG_ID else logId,
+                        voiceprintProcessedAt = if (result.studioHosted || (!distinguish && (candidate.importChannel == null || candidate.speakerCount == 0))) now() else null,
+                        firstFailedAt = null)
                         if (current.redoPending) dao.completeRedo(completed, lines, now()) else dao.complete(completed, lines)
                         if (selected == TranscribeSource.Local) localResume?.success(candidate.id)
                         if (lines.isNotEmpty()) producedLines = true }
@@ -138,9 +188,11 @@ class TranscribeRunner(
                     // 断网不是这一段的问题，不占它的重试次数。
                     val attempts = if (resume || error == AsrError.Network) candidate.attempts else running.attempts
                     val failedAt = now()
+                    val studioOffline = error == AsrError.Network && !legacy
+                    val pending = resume || studioOffline
                     val abandoned = error == AsrError.Audio || (e as? AsrException)?.detail == "录音文件已不存在"
-                    val quiet = !abandoned && candidate.firstFailedAt?.let { failedAt - it > 259_200_000L } == true
-                    outcome = if (abandoned) "Abandoned" else if (quiet) "Quiet" else if (resume) "Pending" else "Failed"
+                    val quiet = !pending && !abandoned && candidate.firstFailedAt?.let { failedAt - it > 259_200_000L } == true
+                    outcome = if (abandoned) "Abandoned" else if (quiet) "Quiet" else if (pending) "Pending" else "Failed"
                     val reason = when {
                         abandoned -> if (!File(candidate.path).isFile) "录音文件已不存在" else "录音损坏，无法转写"
                         quiet -> "多次转写失败"
@@ -148,8 +200,8 @@ class TranscribeRunner(
                     }
                     withContext(NonCancellable) {
                         dao.findSegment(candidate.id)?.let { current -> dao.update(current.copy(status = outcome, completedAt = if (abandoned || quiet) failedAt else null, error = reason,
-                            firstFailedAt = if (resume) candidate.firstFailedAt else current.firstFailedAt ?: failedAt,
-                            attempts = attempts, nextRetryAt = if (resume || abandoned || quiet) null else TranscribePolicy.retryAt(error, attempts.coerceAtLeast(1), failedAt), logId = logId)) }
+                            firstFailedAt = if (pending) candidate.firstFailedAt else current.firstFailedAt ?: failedAt,
+                            attempts = attempts, nextRetryAt = if (pending || abandoned || quiet) null else TranscribePolicy.retryAt(error, attempts.coerceAtLeast(1), failedAt), logId = logId)) }
                         updateState(started, (e as? AsrException)?.detail ?: error.human)
                     }
                     if (e is CancellationException) throw e

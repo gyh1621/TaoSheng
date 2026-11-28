@@ -12,6 +12,7 @@ import app.resound.push.attachScreenTime
 import android.app.Application
 import app.resound.capture.*
 import app.resound.data.CaptureDatabase
+import app.resound.data.writeTransaction
 import app.resound.transcribe.*
 import app.resound.digest.*
 import app.resound.voiceprint.*
@@ -55,6 +56,8 @@ class ResoundApp : Application() {
     lateinit var digestRunner: DigestRunner
         private set
     lateinit var voiceprintRepository: LocalVoiceprintRepository
+        private set
+    internal lateinit var studioSync: StudioSyncQueue
         private set
     override fun onCreate() {
         super.onCreate()
@@ -127,6 +130,10 @@ class ResoundApp : Application() {
             else scheduler.segmentSaved(database.transcribe().pendingMillis())
         }
         val hotwords = AndroidHotwordSettings(this, database.voiceprint(), scope)
+        studioSync = StudioSyncQueue(filesDir, { StudioClient.baseUrl(settings.alignmentEndpoint.value) },
+            { settings.credential(TranscribeSource.Custom) }) {
+            StudioSyncWorker.flushAsync(this, scope, studioSync, newWork = true)
+        }
         AppGraph.hotwords = hotwords
         hotwords.topicWords = { if (AppGraph.isTopicsReady) app.resound.topic.TopicPolicy.words(AppGraph.topics.current.value?.takeIf { app.resound.topic.TopicPolicy.activeAt(it, System.currentTimeMillis()) }?.name) else emptyList() }
         AppGraph.importer = app.resound.importer.AndroidAudioImporter(this, scope, fingerprints = database.folderImports())
@@ -137,6 +144,7 @@ class ResoundApp : Application() {
         voiceprintRepository = LocalVoiceprintRepository(database, scope, { file -> sharedPcm.read(file, pcmReader::readPcm) },
             { CampPlusEmbedding(this) }, voiceprintRerun::request,
             sampleAudioStore = SampleAudioStore(SampleAudioStore.directory(this)))
+        voiceprintRepository.studioSync = studioSync
         AppGraph.voiceprint = voiceprintRepository
         val envSound = app.resound.envsound.LocalEnvSoundRepository.create(this, database, scope,
             voiceprintRepository::recognizesMeBeforeTranscribe, scheduler::runNow, sharedPcm, AppGraph.platform.zone, AppGraph.platform.now::now, AppGraph.platform.dispatchers.io)
@@ -216,6 +224,7 @@ class ResoundApp : Application() {
             recentFiles = { from, until, block -> segmentFiles.withRecentDeletion(from, until, block) },
             voiceprintGuard = { block -> voiceprintRepository.withPrivacyDeletion(block) },
             removeFeatures = voiceprintRepository::removeFeatures,
+            onStudioPrivacyDelete = studioSync::privacyDelete,
             recordingPrivacy = { ids, block ->
                 checkNotNull((AppGraph.push as? app.resound.push.AndroidPushChannels)?.audioPush).withPrivacy(ids, block)
             },
@@ -250,7 +259,8 @@ class ResoundApp : Application() {
             CustomAsrProvider(settings, hotwords::merged), { settings.credential(TranscribeSource.Custom) },
             { settings.ready(TranscribeSource.Custom) && sourceNetwork(TranscribeSource.Custom) }, settings::identity,
             warning = { transcripts.updateState(System.currentTimeMillis(), it) })
-        transcribeRunner = TranscribeRunner(database.transcribe(), ConfiguredAsrProvider(this, settings, hotwords::merged),
+        transcribeRunner = TranscribeRunner(database.transcribe(), ConfiguredAsrProvider(this, settings,
+            { envSound.settings.value }, envSound::isRestoredOrWrong, hotwords::merged),
             settings::credential, transcripts::updateState,
             wholePrepare = { segment, source -> if (source == TranscribeSource.Custom) database.wholeTranscripts().enqueue(segment.id, System.currentTimeMillis(), segment.redoPending) },
             wholeRun = wholeRunner::runPending,
@@ -259,10 +269,18 @@ class ResoundApp : Application() {
             recordTiming = { PipelineTimes.recordSegment(this, it) },
             defaultSource = { settings.source.value }, separateSpeakers = asrSpeed::effectiveSeparateSpeakers, topicTraining = database.topics()::trainingAt,
             beforeTranscribe = envSound::beforeTranscribe,
+            recordStudioDecision = envSound::recordStudioDecision, isRestoredOrWrong = envSound::isRestoredOrWrong,
+            invalidateWhole = { database.wholeTranscripts().invalidate(it) },
+            onStudioUnsyncedSegment = { segment, payload ->
+                if (payload == null) studioSync.segmentSync(segment, null)
+                else database.writeTransaction {
+                    if (database.transcribe().findSegment(segment.id) != null) studioSync.segmentSync(segment, payload)
+                }
+            },
             beginBatch = { envSound.beginBatch() }, endBatch = { envSound.endBatch() }, sharedPcm = sharedPcm,
             afterSegment = { segment ->
                 app.resound.topic.TopicWork.enqueue(this)
-                if (database.transcribe().segment(segment.id).let { it.separateSpeakers != false || (it.importChannel != null && it.speakerCount != 0) }) {
+                if (database.transcribe().findSegment(segment.id)?.let { it.voiceprintProcessedAt == null } == true) {
                     PipelineProgress.stage(PipelineProgress.Stage.Voiceprint)
                     try { voiceprintRepository.runSegment(segment.id) }
                     finally { PipelineProgress.stage(PipelineProgress.Stage.Transcribe) }
@@ -312,7 +330,7 @@ class ResoundApp : Application() {
         AppGraph.topics = topics.repository
         val redoEngine = app.resound.redo.createRedoEngine(this, database, asrChooser, settings, digestSettings, llm,
             hotwords::merged, { AppGraph.prompts.text("digest") }, { AppGraph.prompts.text("merge") },
-            { ids -> voiceprintRepository.recognizeRedo(ids) }, sourceNetwork, situation = AppGraph.situation)
+            { ids -> voiceprintRepository.recognizeRedo(ids) }, sourceNetwork, situation = AppGraph.situation, envSound = envSound, studioSync = studioSync)
         AppGraph.redo = app.resound.redo.AndroidRedoService(this, database, asrChooser, redoEngine, scope,
             { app.resound.redo.llmOptions(digestSettings) }, { digestSettings.presetId.value },
             idle = { block -> transcribeRunner.withIdleAudio { digestRunner.withIdle { block() } } })
@@ -342,7 +360,7 @@ class ResoundApp : Application() {
                     reply.completionTokens, app.resound.usage.UsagePurpose.Digest)
             }, hasBackup = { digestSettings.canUseWithoutKey(it) || digestSettings.failover.hasBackup(it) })
         AppGraph.todoVoice = AndroidTodoVoiceInput(controller, scope, cacheDir,
-            ConfiguredAsrProvider(this, settings, hotwords::merged), settings::credential,
+            ConfiguredAsrProvider(this, settings, hotwords = hotwords::merged), settings::credential,
             recordTokens = { result -> database.transcribe().recordTokens(java.time.LocalDate.now().toString(), result.inputTokens, result.outputTokens) })
         scheduler.digestMinutes = { digestSettings.intervalMinutes.value }
         digestSettings.onIntervalChanged = { scheduler.scheduleDigest() }
@@ -418,6 +436,7 @@ class ResoundApp : Application() {
         pushChannels.attachScreenTime(this, scope)
         pushChannels.attachDayThread(this, database, scope)
         app.resound.recordings.attachRecordingArchive(this, database, pushChannels, scope)
+        StudioSyncWorker.flushAsync(this, scope, studioSync, newWork = false)
         scope.launch { transcribeRunner.recoverOnStartup(); transcribeRunner.withIdleAudio { voiceprintRepository.cleanupAudio() } }
         val folderImports = app.resound.importer.AndroidFolderImports(this, database, scope,
             AppGraph.importer as app.resound.importer.AndroidAudioImporter)

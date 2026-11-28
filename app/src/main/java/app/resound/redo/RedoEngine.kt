@@ -31,6 +31,9 @@ internal class RedoEngine(
     private val now: () -> Long = System::currentTimeMillis,
     /** 停多久算说完（与自动整理同一设置）；选中的相邻事件间隔不超过它就并成一段一起重新整理 */
     private val pauseMillis: () -> Long = { DigestRunner.GAP_MS },
+    private val recordStudioDecision: suspend (SegmentEntity, StudioEnvSound, Long) -> Unit = { _, _, _ -> },
+    private val onStudioUnsyncedSegment: (suspend (SegmentEntity, String?) -> Unit)? = null,
+    private val isStudioOffline: (TranscribeSource) -> Boolean = { it == TranscribeSource.Custom },
 ) {
     private val dao = db.redoData()
     private val snapshots = RedoSnapshot(db)
@@ -108,6 +111,7 @@ internal class RedoEngine(
         run {
             put("segments", "id IN (${s.segments.map { it.segment.id }.sqlIds()})")
             put("whole_transcripts", "segmentId IN (${s.segments.map { it.segment.id }.sqlIds()})")
+            put("env_sounds", "segmentId IN (${s.segments.map { it.segment.id }.sqlIds()})")
         }
     }
 
@@ -143,7 +147,10 @@ internal class RedoEngine(
         // 重新启动时仍用第一次快照；已转写段可从头重跑，但撤销目标不变。
         val before = payload.getJSONObject("before")
         val originalItems = before.getJSONArray("memory_items").let { a -> (0 until a.length()).map { a.getJSONObject(it).getLong("id") } }
-        val trackedSelectors = selectors.toMutableMap().apply { put("memory_items", "${selectors.getValue("memory_items")} OR id IN (${originalItems.sqlIds()})") }
+        val trackedSelectors = selectors.toMutableMap().apply {
+            put("memory_items", "${selectors.getValue("memory_items")} OR id IN (${originalItems.sqlIds()})")
+            if (!before.has("env_sounds")) remove("env_sounds")
+        }
         suspend fun saveAfter(applied: Boolean = false) {
             payload.put("after", snapshots.capture(trackedSelectors))
             dao.snapshot(snapshot!!.copy(payload = payload.toString(), applied = applied))
@@ -155,35 +162,57 @@ internal class RedoEngine(
                 checkpoint(); currentCoroutineContext().ensureActive()
                 progress("重新转写 ${index + 1}/${available.size} 段", index.toFloat() / available.size * .65f)
                 val segment = db.transcribe().findSegment(row.segment.id) ?: error("录音已删除，请重新选择")
+                val source = request.asr ?: chooser.lastChoice.value
                 try {
-                    val result = recognize(segment, request.asr ?: chooser.lastChoice.value)
+                    val began = now()
+                    val result = recognize(segment, source)
                     currentCoroutineContext().ensureActive(); checkpoint()
                     db.writeTransaction {
                         checkpoint()
                         check(snapshots.unchanged(payload.getJSONObject("after"))) { "记录已被修改，请重新重做" }
                         check(db.transcribe().findSegment(segment.id) != null) { "录音已删除" }
+                        if (result.studioHosted && !result.studioWebhookSynced) {
+                            val enqueue = onStudioUnsyncedSegment ?: throw AsrException(AsrError.Server)
+                            val syncPayload = result.studioSyncPayload ?: throw AsrException(AsrError.Server)
+                            withContext(NonCancellable) { enqueue(segment, syncPayload) }
+                        } else {
+                            withContext(NonCancellable) { onStudioUnsyncedSegment?.invoke(segment, null) }
+                        }
                         val lines = result.sentences.map { line ->
                             val start = segment.startAt + line.startMillis; val end = segment.startAt + line.endMillis
                             val old = row.lines.maxByOrNull { overlap(start, end, it.startAt, it.endAt) }
                             TranscriptLineEntity(segmentId = segment.id, startAt = start, endAt = end, text = line.text,
                                 speakerTag = line.speakerTag, originalText = line.originalText, eventId = old?.eventId,
+                                speakerName = line.speakerName, speakerScore = line.speakerScore, speakerPersonId = line.speakerPersonId,
                                 // 重转写不自动让常规整理再次产出事件；明确重新整理时才替换。
                                 digestedAt = old?.digestedAt ?: now())
                         }
                         db.transcribe().completeRedo(db.transcribe().segment(segment.id).copy(status = if (lines.isEmpty()) "Empty" else "Done", completedAt = now(),
-                            error = null, nextRetryAt = null, firstFailedAt = null, voiceprintProcessedAt = if (segment.separateSpeakers == false && !(segment.importChannel != null && segment.speakerCount != 0)) now() else null), lines, now())
+                            error = null, nextRetryAt = null, firstFailedAt = null,
+                            logId = if (result.studioHosted) STUDIO_HOSTED_LOG_ID else segment.logId.takeUnless { it == STUDIO_HOSTED_LOG_ID },
+                            voiceprintProcessedAt = if (result.studioHosted || (segment.separateSpeakers == false && !(segment.importChannel != null && segment.speakerCount != 0))) now() else null), lines, now())
                         saveAfter()
                     }
-                    afterTranscribe(segment, request.asr ?: chooser.lastChoice.value)
+                    result.studioEnvSound?.let { recordStudioDecision(segment, it, (now() - began).coerceAtLeast(0)) }
+                    afterTranscribe(segment, source)
                     db.writeTransaction { saveAfter() }
                 } catch (e: CancellationException) { throw e }
                 catch (e: AsrException) {
                     db.writeTransaction {
                         check(snapshots.unchanged(payload.getJSONObject("after"))) { "记录已被修改，请重新重做" }
-                        val attempts = segment.attempts + 1
-                        db.transcribe().findSegment(segment.id)?.let { db.transcribe().update(it.copy(status = if (e.type == AsrError.Audio) "Abandoned" else "Failed",
-                            attempts = attempts, error = e.type.human, firstFailedAt = it.firstFailedAt ?: now(),
-                            redoPending = true, asrSource = (request.asr ?: chooser.lastChoice.value).name, nextRetryAt = TranscribePolicy.retryAt(e.type, attempts, now()))) }
+                        val studioOffline = e.type == AsrError.Network && isStudioOffline(source)
+                        val attempts = if (e.type == AsrError.Network) segment.attempts else segment.attempts + 1
+                        val status = when {
+                            studioOffline -> "Pending"
+                            e.type == AsrError.Audio -> "Abandoned"
+                            else -> "Failed"
+                        }
+                        db.transcribe().findSegment(segment.id)?.let { current ->
+                            db.transcribe().update(current.copy(status = status, attempts = attempts, error = e.type.human,
+                                firstFailedAt = if (studioOffline) segment.firstFailedAt else current.firstFailedAt ?: now(),
+                                redoPending = true, asrSource = source.name,
+                                nextRetryAt = if (studioOffline) null else TranscribePolicy.retryAt(e.type, attempts, now())))
+                        }
                         saveAfter()
                     }
                     throw e

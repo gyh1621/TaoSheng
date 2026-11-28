@@ -36,6 +36,7 @@ class RoomPrivacyActions(
     private val archiveFiles: suspend (Long,Long,suspend (List<String>) -> ForgetResult) -> ForgetResult = { _,_,block -> block(emptyList()) },
     private val onErased: suspend () -> Unit = {},
     private val recordingPrivacy: suspend (List<Long>, suspend () -> ForgetResult) -> ForgetResult = { _, block -> block() },
+    private val onStudioPrivacyDelete: suspend (List<Long>, List<Pair<Long, Long>>, Boolean) -> Unit = { _, _, _ -> },
 ) : PrivacyActions, SegmentDeleter {
     private val gate = Mutex()
     private val dao = db.privacy()
@@ -121,6 +122,13 @@ class RoomPrivacyActions(
             val files = mutableListOf<Pair<SegmentEntity, List<TranscriptLineEntity>>>()
             val nightSpeech = mutableListOf<Pair<Long, Long>>()
             val selected = select()
+            val studioIds = mutableListOf<Long>()
+            val studioRanges = mutableListOf<Pair<Long, Long>>()
+            val deleteAll = screenRange == (Long.MIN_VALUE to Long.MAX_VALUE)
+            if (selected.isEmpty() && !deleteAll) screenRange?.let { (from, until) ->
+                val start = from.coerceAtLeast(0)
+                if (until > start) studioRanges += start to until
+            }
             val result = recordingPrivacy(selected.map { it.id }) { db.writeTransaction {
                 onStage(EventDeletionPhase.Records)
                 app.resound.redo.clearRedoForPrivacy(db, selected.map { it.id }.toSet(), explicitEvent)
@@ -149,9 +157,11 @@ class RoomPrivacyActions(
                         dao.deleteLineVectors(segment.id)
                         lines += dao.deleteLines(segment.id)
                         deletedSegments += dao.deleteSegment(segment.id)
+                        studioIds += segment.id
                     } else {
                         // 一段录音可能分出多件事：音频整段清除，其他事件的文字保留。
                         for (line in target) {
+                            studioRanges += line.startAt to maxOf(line.startAt + 1, line.endAt)
                             items += dao.deleteLineItemsById(line.id)
                             lines += dao.deleteLine(line.id)
                         }
@@ -203,7 +213,8 @@ class RoomPrivacyActions(
                 (app.resound.AppGraph.night as? app.resound.night.AndroidNight)?.store?.forgetSpeech(nightSpeech)
             }.onFailure { FailureNotes.record("privacy/night-speech", it) }
             try {
-                onErased()
+                try { onStudioPrivacyDelete(studioIds, studioRanges.distinct(), deleteAll) }
+                finally { onErased() }
             } finally {
                 onStage(EventDeletionPhase.Files)
                 if (files.isNotEmpty() || extraFiles.isNotEmpty()) runCatching { scheduleCleanup() }.onFailure {

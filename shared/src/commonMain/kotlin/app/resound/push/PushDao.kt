@@ -15,5 +15,6 @@ abstract class PushDao {
     @Query("SELECT * FROM skill_cards WHERE deletedAt IS NULL ORDER BY at, id") abstract suspend fun cards(): List<SkillCardRow>
     @Query("SELECT * FROM reviews ORDER BY startDate, id") abstract suspend fun reviews(): List<ReviewEntity>
     @Query("SELECT l.* FROM transcript_lines l INDEXED BY index_transcript_lines_startAt CROSS JOIN segments s ON s.id = l.segmentId WHERE s.status = 'Done' AND l.startAt >= :start ORDER BY l.startAt, l.id") abstract suspend fun lines(start: Long): List<TranscriptLineEntity>
+    @Query("SELECT segmentId, groupKey FROM voiceprint_exclusions") abstract suspend fun voiceprintExclusions(): List<VoiceprintExclusionKey>
 
 }

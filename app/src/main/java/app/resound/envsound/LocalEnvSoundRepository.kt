@@ -63,6 +63,20 @@ class LocalEnvSoundRepository(
     override fun reportWrong(segmentId: Long) = store.reportWrong(segmentId)
     override suspend fun audio(segmentId: Long) = store.audio(segmentId)
     suspend fun diagnostics() = store.diagnostics()
+
+    internal suspend fun isRestoredOrWrong(id: Long): Boolean = dao.get(id)?.let { it.restored || it.reportedWrong } == true
+
+    internal suspend fun recordStudioDecision(segment: SegmentEntity, sound: StudioEnvSound, elapsedMs: Long) {
+        db.writeTransaction {
+            if (db.transcribe().findSegment(segment.id) == null || isRestoredOrWrong(segment.id)) return@writeTransaction
+            val tags = EnvTag.entries.filter { it.name in sound.tags }
+            val sounds = SpecialSound.entries.filter { it.name in sound.sounds }
+            val verdict = SegmentVerdict.entries.firstOrNull { it.name.equals(sound.verdict, ignoreCase = true) }
+                ?: if (sound.markMedia) SegmentVerdict.Media else if (sound.skip) SegmentVerdict.Skipped else SegmentVerdict.Keep
+            dao.saveStudio(EnvSoundRow(segment.id, segment.startAt, segment.endAt, segment.path, verdict.name, sound.reason,
+                tags.encoded(), sounds.encoded(), EnvSoundEvidence(sound.scores).json(), sound.skip, sound.markMedia, elapsedMs = elapsedMs))
+        }
+    }
     /** 在 TranscribeRunner 的串行锁内执行，结果落库后才允许改变转写状态。 */
     suspend fun beforeTranscribe(segment: SegmentEntity): Boolean {
         val existing = dao.get(segment.id)

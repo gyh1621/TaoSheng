@@ -404,6 +404,23 @@ class AndroidPushChannels internal constructor(
         nextFootprintAt(now, zone)
     }
 
+    /**
+     * 足迹变化即同步：只推订阅了足迹的 Webhook（给 Agent 的数据通道），不打扰给人看的通知通道。
+     * 不写 footprint-sent，晚上到点的全量推送照常；发送失败走原有发件箱重试。返回已发出或已入重试队列的通道数。
+     */
+    internal suspend fun dispatchFootprintLive(date: java.time.LocalDate = java.time.LocalDate.now(), channelIds: Set<Long>? = null): Int = footprintMutex.withLock {
+        val targets = liveFootprintWebhookIds().let { ids -> if (channelIds == null) ids else ids intersect channelIds }
+        if (targets.isEmpty()) return@withLock 0
+        val message = try { footprintMessage(date) } catch (e: CancellationException) { throw e } catch (caught: Exception) {
+            FailureNotes.record("push/footprint-live", caught); null } ?: return@withLock 0
+        targets.forEach { deliver(it, message) }
+        targets.size
+    }
+
+    /** 变化即同步的目标：启用且订阅足迹的 Webhook。 */
+    internal fun liveFootprintWebhookIds(list: List<PushChannel> = channels.value): Set<Long> =
+        list.filter { it.enabled && it.subscription.footprint && it.kind == PushKind.Webhook }.mapTo(mutableSetOf()) { it.id }
+
     internal fun nextFootprintAt(now: Long = System.currentTimeMillis(), zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): Long? {
         val today = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
         return channels.value.filter { it.enabled && it.subscription.footprint }.map { ch ->
@@ -564,7 +581,20 @@ class AndroidPushChannels internal constructor(
                     return@withContext false
                 }
             } else message
-            val attempt = attempt(row.getLong("channelId"), outgoing, testing)
+            // 足迹按日期重建最新状态再发，且与 dispatchFootprint / dispatchFootprintLive 串行，旧报文不会盖掉新状态。
+            val attempt = if (message.topic == PushTopic.Footprint) {
+                val rawDate = message.footprint?.takeUnless { it.isNull("date") }?.optString("date").orEmpty()
+                val date = if (rawDate.isNotEmpty()) java.time.LocalDate.parse(rawDate)
+                    else java.time.Instant.ofEpochMilli(message.at).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+                footprintMutex.withLock {
+                    val latest = footprintMessage(date) ?: run {
+                        FailureNotes.record("push/footprint-stale-dropped", IllegalStateException("footprint pending dropped after recheck"))
+                        outbox.edit().remove(job).commit()
+                        return@withContext false
+                    }
+                    attempt(row.getLong("channelId"), latest, testing)
+                }
+            } else attempt(row.getLong("channelId"), outgoing, testing)
             val again = attempt?.result?.isFailure == true && attemptCount < 2
             if (again) check(outbox.edit().putString(job, row.put("message", attempt!!.snapshot.json()).toString()).commit())
             if (!again) outbox.edit().remove(job).commit()

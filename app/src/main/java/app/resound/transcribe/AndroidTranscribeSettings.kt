@@ -123,7 +123,7 @@ class AndroidTranscribeSettings internal constructor(private val context: Contex
     val customEndpointMode get() = customSettings.endpointMode.value
     val customPrompt get() = customSettings.customPrompt
     val alignmentEndpoint get() = preferences.alignmentEndpoint
-    fun setAlignmentEndpoint(value: String) = preferences.setAlignmentEndpoint(value)
+    fun setAlignmentEndpoint(value: String) { preferences.setAlignmentEndpoint(value); refreshReady() }
     fun setLanguage(value: LocalAsrLanguage) = preferences.setLanguage(value)
     fun npuCheck(key: String) = preferences.npuCheck(key)
     fun recordNpuCheck(key: String, ok: Boolean) {
@@ -209,7 +209,8 @@ class AndroidTranscribeSettings internal constructor(private val context: Contex
         TranscribeSource.Doubao -> runCatching { readKey(source).isNotBlank() || headers(source.name).any { it.value.isNotBlank() } }.onFailure {
             FailureNotes.record("transcribe/AndroidTranscribeSettings.kt:88", it)
         }.getOrDefault(false)
-        TranscribeSource.Custom -> customModel.isNotBlank() && runCatching { validateEndpoint(customEndpoint, endpointMode.value); true }.onFailure {
+        TranscribeSource.Custom -> StudioClient.baseUrl(alignmentEndpoint.value) != null ||
+            customModel.isNotBlank() && runCatching { validateEndpoint(customEndpoint, endpointMode.value); true }.onFailure {
             FailureNotes.record("transcribe/AndroidTranscribeSettings.kt:89", it)
         }.getOrDefault(false)
     }
@@ -226,7 +227,8 @@ class AndroidTranscribeSettings internal constructor(private val context: Contex
         _hasKey.value = usable()
         customSettings.refresh()
     }
-    private fun usable() = (source.value == TranscribeSource.Custom && customEndpoint.isNotBlank() && customModel.isNotBlank()) || runCatching {
+    private fun usable() = (source.value == TranscribeSource.Custom &&
+        (StudioClient.baseUrl(alignmentEndpoint.value) != null || customEndpoint.isNotBlank() && customModel.isNotBlank())) || runCatching {
         readKey().isNotBlank() || headers(source.value.name).any { it.value.isNotBlank() }
     }.onFailure {
         FailureNotes.record("transcribe/AndroidTranscribeSettings.kt:99", it)

@@ -31,8 +31,13 @@ internal fun List<Long>.sqlIds() = if (isEmpty()) "NULL" else distinct().joinToS
 
 /** 只快照本任务涉及的行；JSON 保留列类型和 NULL，不复制整个数据库，也不回滚计费用量。 */
 internal class RedoSnapshot(private val db: CaptureDatabase) {
+    private fun rowKey(table: String) = when (table) {
+        "whole_transcripts", "env_sounds" -> "segmentId"
+        else -> "id"
+    }
+
     suspend fun rows(table: String, where: String): JSONArray = JSONArray().apply {
-        db.readSql("SELECT * FROM $table WHERE $where ORDER BY ${if (table == "whole_transcripts") "segmentId" else "id"}") { c ->
+        db.readSql("SELECT * FROM $table WHERE $where ORDER BY ${rowKey(table)}") { c ->
             while (c.step()) put(JSONObject().apply {
                 c.columnNames.forEachIndexed { i, name -> put(name, when (c.getColumnType(i)) {
                     androidx.sqlite.SQLITE_DATA_NULL -> JSONObject.NULL
@@ -46,7 +51,7 @@ internal class RedoSnapshot(private val db: CaptureDatabase) {
     suspend fun capture(selectors: Map<String, String>) = JSONObject().apply { selectors.forEach { (t, w) -> put(t, rows(t, w)) } }
     suspend fun restore(data: JSONObject) {
         // UPDATE segments 避免 REPLACE 级联删除原话；其余表由调用者先按 ID 清理。
-        listOf("segments", "memory_events", "transcript_lines", "memory_items", "skill_cards", "whole_transcripts").filter { data.has(it) }.forEach { table ->
+        listOf("segments", "memory_events", "transcript_lines", "memory_items", "skill_cards", "whole_transcripts", "env_sounds").filter { data.has(it) }.forEach { table ->
             val rows = data.getJSONArray(table)
             for (i in 0 until rows.length()) {
                 val row = rows.getJSONObject(i)
@@ -60,16 +65,16 @@ internal class RedoSnapshot(private val db: CaptureDatabase) {
     }
     suspend fun delete(data: JSONObject) {
         // 子表先删，避免 FK 级联影响保留项。
-        listOf("memory_items", "transcript_lines", "skill_cards", "memory_events", "whole_transcripts").forEach { table ->
+        listOf("memory_items", "transcript_lines", "skill_cards", "memory_events", "whole_transcripts", "env_sounds").forEach { table ->
             val rows = data.optJSONArray(table) ?: return@forEach
-            val key = if (table == "whole_transcripts") "segmentId" else "id"
+            val key = rowKey(table)
             val ids = (0 until rows.length()).map { rows.getJSONObject(it).getLong(key) }
             db.writeSql("DELETE FROM $table WHERE $key IN (${ids.sqlIds()})")
         }
     }
     suspend fun unchanged(data: JSONObject, voiceprint: Boolean = false): Boolean = data.keys().asSequence().all { table ->
         val old = data.getJSONArray(table)
-        val key = if (table == "whole_transcripts") "segmentId" else "id"
+        val key = rowKey(table)
         val ids = (0 until old.length()).map { old.getJSONObject(it).getLong(key) }
         fun comparable(value: JSONArray): String {
             val copy = JSONArray(value.toString())
@@ -86,7 +91,7 @@ internal class RedoSnapshot(private val db: CaptureDatabase) {
         }.orEmpty()
         // 既核对旧行，也发现后台新增的子行；否则空 B 或新 A/引用可能绕过 ID 快照校验。
         val where = when (table) {
-            "whole_transcripts" -> "$key IN (${(ids + idsOf("segments") + idsOf("transcript_lines", "segmentId")).sqlIds()})"
+            "whole_transcripts", "env_sounds" -> "$key IN (${(ids + idsOf("segments") + idsOf("transcript_lines", "segmentId")).sqlIds()})"
             "transcript_lines" -> "id IN (${ids.sqlIds()}) OR segmentId IN (${idsOf("segments").sqlIds()}) OR eventId IN (${idsOf("memory_events").sqlIds()})"
             "memory_items" -> "id IN (${ids.sqlIds()}) OR eventId IN (${idsOf("memory_events").sqlIds()}) OR lineId IN (${idsOf("transcript_lines").sqlIds()}) OR doneHintLineId IN (${idsOf("transcript_lines").sqlIds()})"
             else -> "$key IN (${ids.sqlIds()})"
@@ -102,7 +107,7 @@ internal suspend fun clearRedoForPrivacy(db: CaptureDatabase, segmentIds: Set<Lo
         val payload = JSONObject(row.payload)
         listOf("before", "after").any { side ->
             val data = payload.getJSONObject(side)
-            listOf("segments" to "id", "transcript_lines" to "segmentId", "whole_transcripts" to "segmentId", "memory_events" to "id").any { (table, column) ->
+            listOf("segments" to "id", "transcript_lines" to "segmentId", "whole_transcripts" to "segmentId", "env_sounds" to "segmentId", "memory_events" to "id").any { (table, column) ->
                 val a = data.optJSONArray(table) ?: JSONArray()
                 (0 until a.length()).any { i -> val id = a.getJSONObject(i).getLong(column)
                     if (table == "memory_events") eventId == id else id in segmentIds }

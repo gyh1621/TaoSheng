@@ -15,6 +15,8 @@ internal data class PushSnapshot(
     val lines: List<TranscriptLineEntity> = emptyList(), val repeats: Map<Long, Int> = emptyMap(),
     val startDate: LocalDate? = null,
     val lineOrigins: Map<Long, Long?> = emptyMap(),
+    /** (segmentId, groupKey) 被手标“不是我”的说话人组；只随原话行加载。 */
+    val voiceprintExclusions: Set<Pair<Long, String>> = emptySet(),
 ) {
     suspend fun select(s: PushSubscription, since: LocalDate?, today: LocalDate, zone: ZoneId): PushSnapshot {
         val lower = PushRecordRules.lower(s, since?.toKotlinLocalDate(), today.toKotlinLocalDate())?.toJavaLocalDate()
@@ -44,7 +46,7 @@ internal data class PushSnapshot(
             if (s.lines == LinesMode.Off) emptyList() else lines.filter {
                 included(it.startAt) && (it.eventId == null || it.eventId in ids) &&
                     PushRecordRules.line(s.lines, it.speakerName, it.text)
-            }, repeats, lower, origins)
+            }, repeats, lower, origins, voiceprintExclusions)
     }
 }
 internal fun day(at: Long, zone: ZoneId) = Instant.ofEpochMilli(at).atZone(zone).toLocalDate()
@@ -52,7 +54,8 @@ internal fun day(at: Long, zone: ZoneId) = Instant.ofEpochMilli(at).atZone(zone)
 internal suspend fun PushDao.snapshot(start: Long, withLines: Boolean): PushSnapshot = transaction {
         val rows = items()
         val repeats = rows.groupingBy { it.mergedInto ?: it.id }.eachCount()
-        PushSnapshot(events(), rows, cards(), reviews(), if (withLines) lines(start) else emptyList(), repeats, lineOrigins = lineOrigins().associate { it.id to it.eventId })
+        PushSnapshot(events(), rows, cards(), reviews(), if (withLines) lines(start) else emptyList(), repeats, lineOrigins = lineOrigins().associate { it.id to it.eventId },
+            voiceprintExclusions = if (withLines) voiceprintExclusions().mapTo(mutableSetOf()) { it.segmentId to it.groupKey } else emptySet())
     }
 
 /** 非订阅调用也逐条验证；重复生成文档时由 trace 的记录键去重计数。 */

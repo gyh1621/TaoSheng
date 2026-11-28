@@ -72,6 +72,7 @@ object PreferenceBackupPolicy {
         "privacy-spool" to "待删除录音的本机路径暂存",
         "problem-reports" to "本机闪退提示已读标记",
         "push-retries" to "发送失败的发件箱队列，恢复后不能重发旧消息",
+        "footprint-live" to "足迹变化即同步的本机去重摘要，恢复后应按新设备状态重新同步",
         "recording-pack" to "录音打包任务及本机 URI",
         "redo-jobs" to "重做任务和执行进度",
         "redo-ui" to "收起过的撤销提示，跟本机重做快照走",

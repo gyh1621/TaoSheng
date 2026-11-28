@@ -1,8 +1,15 @@
 package app.resound.transcribe
 
-data class AsrSentence(val startMillis: Long, val endMillis: Long, val text: String, val speakerTag: String?, val originalText: String? = null)
+data class AsrSentence(val startMillis: Long, val endMillis: Long, val text: String, val speakerTag: String?,
+    val originalText: String? = null, val speakerName: String? = null, val speakerScore: Float? = null,
+    val speakerPersonId: Long? = null)
 data class AsrResult(val sentences: List<AsrSentence>, val durationMillis: Long, val logId: String?,
-    val inputTokens: Long? = null, val outputTokens: Long? = null, val customCapability: CustomCapability? = null)
+    val inputTokens: Long? = null, val outputTokens: Long? = null, val customCapability: CustomCapability? = null,
+    val studioHosted: Boolean = false, val studioEnvSound: StudioEnvSound? = null,
+    val studioWebhookSynced: Boolean = true, val studioSyncPayload: String? = null)
+
+data class StudioEnvSound(val verdict: String, val reason: String?, val skip: Boolean, val markMedia: Boolean,
+    val tags: List<String>, val sounds: List<String>, val scores: Map<String, Float>)
 enum class AsrError(val human: String, val retryable: Boolean = false) {
     Speakers("说话人分段失败，请重新下载分段模型或在人物与声纹中关闭多人分段"),
     ModelMissing("请在转写设置中下载所需的本地模型"), LocalEngine("本机识别失败，可改用 CPU 识别或重新下载模型"), Auth("密钥无效或未开通"), Network("网络连接失败，等待重试", true), Timeout("转写超时，等待重试", true),

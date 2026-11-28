@@ -79,6 +79,9 @@ data class LlmUsageEntity(val day: String, val promptTokens: Long, val completio
 @Entity(tableName = "llm_usage_v2", primaryKeys = ["day", "purpose"])
 data class LlmUsageV2Entity(val day: String, val purpose: String, val promptTokens: Long, val completionTokens: Long, val calls: Int)
 
+/** voiceprint_exclusions 的只读投影：哪些说话人组被手标为“不是我”。 */
+data class VoiceprintExclusionKey(val segmentId: Long, val groupKey: String)
+
 @Dao
 abstract class MemoryDao {
     @Transaction open suspend fun <T> transaction(block: suspend () -> T): T = block()
@@ -363,6 +366,7 @@ abstract class MemoryDao {
         WHERE s.status = 'Done' AND l.startAt >= :start AND l.startAt < :end
         AND (e.id IS NULL OR e.deleted = 0) ORDER BY l.startAt, l.id""")
     abstract suspend fun diaryLines(start: Long, end: Long): List<TranscriptLineEntity>
+    @Query("SELECT segmentId, groupKey FROM voiceprint_exclusions") abstract suspend fun voiceprintExclusions(): List<VoiceprintExclusionKey>
     @Query("""SELECT MAX(at) FROM (
         SELECT startAt AS at FROM memory_events WHERE deleted = 0 AND (scene != '媒体' OR starred = 1)
         UNION ALL SELECT l.startAt AS at FROM transcript_lines l JOIN segments s NOT INDEXED ON s.id = l.segmentId

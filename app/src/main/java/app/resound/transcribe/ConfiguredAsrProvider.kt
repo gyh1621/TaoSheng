@@ -59,16 +59,39 @@ class CustomAsrProvider(private val settings: AndroidTranscribeSettings, private
         catch(e:java.io.IOException){throw AsrException(AsrError.Network,detail=modelServiceError(endpoint,e,AsrError.Network.human))}
     }
 }
-class ConfiguredAsrProvider(context:Context,private val settings:AndroidTranscribeSettings, private val hotwords: () -> List<String> = { emptyList() }):AsrProvider {
+class ConfiguredAsrProvider(context: Context, private val settings: AndroidTranscribeSettings,
+    private val studioEnvSettings: () -> app.resound.envsound.EnvSoundSettings = { app.resound.envsound.EnvSoundSettings() },
+    private val keepStudioAudio: suspend (Long) -> Boolean = { false },
+    private val hotwords: () -> List<String> = { emptyList() },
+) : AsrProvider {
+    internal fun currentSource() = settings.source.value
+    internal fun hasStudio() = StudioClient.baseUrl(settings.alignmentEndpoint.value) != null
+
     private val doubao=DoubaoAsrProvider(AsrAudioReader(context.cacheDir), hotwords = hotwords, headers = { settings.headers(TranscribeSource.Doubao.name) },
         plan = { settings.doubaoPlan.value })
     private val local=LocalAsrProvider(context,settings,hotwords)
-    private val custom=CustomSpeakerAsrProvider(context, settings, CustomAsrProvider(settings, hotwords))
+    private val custom = CustomAsrProvider(settings, hotwords)
+    private val customWithSpeakers = CustomSpeakerAsrProvider(context, settings, custom)
     override suspend fun recognize(audio:AsrAudio,key:String,beforeAudio:suspend()->Unit):AsrResult = recognize(settings.source.value, audio, key, beforeAudio)
-    internal suspend fun recognize(source: TranscribeSource, audio: AsrAudio, key: String, beforeAudio: suspend () -> Unit): AsrResult = when(source){
+    internal suspend fun recognize(source: TranscribeSource, audio: AsrAudio, key: String, beforeAudio: suspend () -> Unit): AsrResult {
+        var reserved = false
+        suspend fun reserveOnce() { if (!reserved) { beforeAudio(); reserved = true } }
+        return recognizeStudio(source, audio, key, ::reserveOnce) ?: recognizeLegacy(source, audio, key, ::reserveOnce)
+    }
+
+    internal suspend fun recognizeStudio(source: TranscribeSource?, audio: AsrAudio, key: String,
+        beforeAudio: suspend () -> Unit): AsrResult? {
+        if (source != TranscribeSource.Custom || audio.segmentId == null) return null
+        val base = StudioClient.baseUrl(settings.alignmentEndpoint.value) ?: return null
+        return StudioClient.process(base, audio, key, settings.language.value.code, hotwords(), studioEnvSettings(),
+            keepStudioAudio(audio.segmentId), beforeAudio)
+    }
+
+    internal suspend fun recognizeLegacy(source: TranscribeSource, audio: AsrAudio, key: String,
+        beforeAudio: suspend () -> Unit): AsrResult = when (source) {
         // 073 审核：同批没有节省时长，默认不剪音，也不为剪音额外解码。
         TranscribeSource.Doubao->doubao.recognize(audio,key,beforeAudio)
         TranscribeSource.Local->local.recognize(audio,key,beforeAudio)
-        TranscribeSource.Custom->custom.recognize(audio,key,beforeAudio)
+        TranscribeSource.Custom -> (if (audio.segmentId == null) custom else customWithSpeakers).recognize(audio, key, beforeAudio)
     }
 }

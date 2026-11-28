@@ -8,7 +8,8 @@ import app.resound.transcribe.measureAsr
 
 import app.resound.data.writeTransaction
 import app.resound.data.*
-import app.resound.transcribe.TranscribePolicy
+import app.resound.transcribe.STUDIO_HOSTED_LOG_ID
+import app.resound.transcribe.StudioSyncQueue
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -25,6 +26,7 @@ class LocalVoiceprintRepository(
     private val now: () -> Long = System::currentTimeMillis,
     internal val sampleAudioStore: SampleAudioStore = SampleAudioStore(null),
 ) : VoiceprintRepository {
+    internal var studioSync: StudioSyncQueue? = null
     private val dao = db.voiceprint()
     private val gate = Mutex()
     private val actions = Mutex()
@@ -74,6 +76,7 @@ class LocalVoiceprintRepository(
             val value = validName(name)
             db.writeTransaction { dao.renamePerson(id, value); dao.renameResults(id, value) }
             revision++
+            studioSync?.person("rename", id, value)
         }
     }
     override fun deletePerson(id: Long) = launchAudioAction {
@@ -84,6 +87,7 @@ class LocalVoiceprintRepository(
                 dao.clearPersonResults(id); dao.clearPersonSamples(id); dao.deletePerson(id); invalidateRetained()
             }
             revision++
+            studioSync?.person("delete", id)
         }
     }
     override fun samples(personId: Long): Flow<List<VoiceprintSample>> = combine(dao.observePersonSamples(personId), sampleAudioStore.changes) { rows, _ ->
@@ -132,9 +136,14 @@ class LocalVoiceprintRepository(
             val line = requireNotNull(dao.line(lineId))
             require(line.voiceInputJson == null) { "语音输入的身份固定为我，不参与声纹" }
             val key = VoiceprintAudio.groupKey(line)
-            val ids = dao.lines(line.segmentId).filter { VoiceprintAudio.groupKey(it) == key }.map { it.id }
-            db.writeTransaction { dropFile(line.segmentId, key); dao.removeSample(line.segmentId, key); dao.identity(ids, null, null, null, true); invalidateRetained() }
+            val ordered = dao.lines(line.segmentId)
+            val ids = ordered.filter { VoiceprintAudio.groupKey(it) == key }.map { it.id }
+            db.writeTransaction {
+                dropFile(line.segmentId, key); dao.removeSample(line.segmentId, key); dao.unexclude(line.segmentId, key)
+                dao.identity(ids, null, null, null, true); invalidateRetained()
+            }
             revision++
+            studioSync?.takeIf { it.configured() }?.correct(db.transcribe().segment(line.segmentId), line, ordered, "clear")
         }
     }
     /** 转写前只做“我”的保守保护，不写声纹样本，不依赖尚未产生的转写句。 */
@@ -161,8 +170,16 @@ class LocalVoiceprintRepository(
     private suspend fun unpin(id: Long) = withContext(NonCancellable) {
         gate.withLock { if (reading.getValue(id) == 1) reading.remove(id) else reading[id] = reading.getValue(id) - 1 }
     }
-    private suspend fun <T> engine(block: suspend (SpeakerEmbedding) -> T): T {
-        val model = createEngine()
+    private suspend fun <T> engine(block: suspend (SpeakerEmbedding) -> T): T = useEngine(createEngine(), block)
+
+    private suspend fun <T> engineForManualAction(block: suspend (SpeakerEmbedding) -> T): T? {
+        val model = try { createEngine() } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { if (studioSync?.configured() == true) return null else throw e }
+        catch (e: LinkageError) { if (studioSync?.configured() == true) return null else throw e }
+        return useEngine(model, block)
+    }
+
+    private suspend fun <T> useEngine(model: SpeakerEmbedding, block: suspend (SpeakerEmbedding) -> T): T {
         try { return block(model) } finally { (model as? AutoCloseable)?.close() }
     }
     /**
@@ -170,7 +187,7 @@ class LocalVoiceprintRepository(
      * 全部置回待处理只会让进度显示成“全量重配”，并让清理录音、整理白白多等一轮。
      */
     private suspend fun invalidateRetained() {
-        dao.doneSegments().filter { File(it.path).isFile }
+        dao.doneSegments().filter { it.logId != STUDIO_HOSTED_LOG_ID && File(it.path).isFile }
             .map { it.id }.chunked(500).forEach { dao.invalidateSegments(it) }
     }
     private fun launchAudioAction(block: suspend () -> Unit) = launchAction { playback.withLock { block() } }
@@ -236,7 +253,8 @@ class LocalVoiceprintRepository(
             val feature = if (!File(group.segment.path).isFile) group.feature else {
                 // 用户确认仍按约定锁定整组；补样本只使用所点句子的连续窗口。
                 val clicked = group.lines.first { it.id == lineId }
-                val pcm = readPcm(File(group.segment.path))
+                val pcm = try { readPcm(File(group.segment.path)) } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { if (studioSync?.configured() == true) ShortArray(0) else throw e }
                 val slices = WindowedVoiceprint.windows(group.segment.startAt, group.segment.endAt, listOf(clicked))
                     .mapNotNull { window ->
                         val from = ((window.start - group.segment.startAt) * 16).coerceIn(0, pcm.size.toLong()).toInt()
@@ -244,7 +262,7 @@ class LocalVoiceprintRepository(
                         VoiceprintAudio.trimSilence(pcm.copyOfRange(from, to)).takeIf { it.size >= VoiceprintAudio.MIN_SAMPLES }
                     }
                 clip = slices.firstOrNull()
-                if (slices.isEmpty()) null else engine { model ->
+                if (slices.isEmpty()) null else engineForManualAction { model ->
                     val vectors = slices.map { VoiceprintMath.unit(model.compute(it)) }
                     val coherent = vectors.indices.all { i -> (0 until i).all { j ->
                         VoiceprintMath.cosine(vectors[i], vectors[j]) >= 0.65f
@@ -275,6 +293,8 @@ class LocalVoiceprintRepository(
                     invalidateRetained() // 后台复用缓存重打分；只重配录音还在的段，不在本次点击中遍历历史录音。
                 }
                 revision++
+                studioSync?.takeIf { it.configured() }?.correct(group.segment, group.lines.first { it.id == lineId },
+                    dao.lines(group.segment.id), "assign", personId, personName, clip)
             }
         } finally { unpin(group.segment.id) }
     }
@@ -283,14 +303,16 @@ class LocalVoiceprintRepository(
             val line = requireNotNull(dao.line(lineId))
             require(line.voiceInputJson == null) { "语音输入的身份固定为我，不参与声纹" }
             val key = VoiceprintAudio.groupKey(line)
+            val ordered = dao.lines(line.segmentId)
             db.writeTransaction {
                 dropFile(line.segmentId, key)
                 dao.removeSample(line.segmentId, key)
                 dao.exclude(VoiceprintExclusionEntity(line.segmentId, key, now()))
-                dao.identity(dao.lines(line.segmentId).filter { VoiceprintAudio.groupKey(it) == key }.map { it.id }, null, null, null, true)
+                dao.identity(ordered.filter { VoiceprintAudio.groupKey(it) == key }.map { it.id }, null, null, null, true)
                 invalidateRetained()
             }
             revision++
+            studioSync?.takeIf { it.configured() }?.correct(db.transcribe().segment(line.segmentId), line, ordered, "not_me")
         }
     }
     override fun reset() = launchAudioAction {
@@ -301,6 +323,7 @@ class LocalVoiceprintRepository(
                 dao.clearSamples(); dao.clearExclusions(); dao.clearResults(); invalidateRetained()
             }
             revision++; resetGeneration++
+            studioSync?.person("reset_me", 0)
         }
     }
     override suspend fun enrollPcm(pcm: ShortArray): Result<Unit> = enrollPerson(0, pcm)
@@ -309,16 +332,17 @@ class LocalVoiceprintRepository(
             actions.withLock {
                 val speech = VoiceprintAudio.trimSilence(pcm)
                 require(speech.size >= VoiceprintAudio.MIN_SAMPLES)
-                val vector = engine { VoiceprintMath.unit(it.compute(speech)) }
+                val vector = engineForManualAction { VoiceprintMath.unit(it.compute(speech)) }
                 gate.withLock {
-                    db.writeTransaction {
-                        require(personId == 0L || dao.people().any { it.id == personId })
+                    val name = if (personId == 0L) "我" else requireNotNull(dao.people().find { it.id == personId }).name
+                    if (vector != null) db.writeTransaction {
                         dao.saveSample(VoiceprintSampleEntity(source = "enroll", sourceLineId = null, segmentId = null, groupKey = null,
                             vector = VoiceprintMath.encode(vector), durationMillis = speech.size / 16L, createdAt = now(), personId = personId))
                             .also { id -> sampleAudioStore.save("local-$id", speech) }
                         invalidateRetained()
                     }
                     revision++
+                    studioSync?.enroll(personId, name, speech)
                     error.value = null
                 }
             }
@@ -371,13 +395,14 @@ class LocalVoiceprintRepository(
     }
 
     internal suspend fun recognizeRedo(ids: List<Long>): Boolean = withContext(Dispatchers.IO) {
-        rounds.withLock { process(db.transcribe().exportSegments(ids).map { it.segment }, train = false) }
+        rounds.withLock { process(db.transcribe().exportSegments(ids).map { it.segment }.filter { it.voiceprintProcessedAt == null }, train = false) }
     }
     private suspend fun process(selected: List<SegmentEntity>? = null, train: Boolean = true, onProgress: (Int, Int) -> Unit = { _, _ -> }): Boolean {
         val round = gate.withLock { Round(dao.allSamples(), revision, resetGeneration, dao.people(), dao.sampleInputs().associate { it.sampleId to it.sourceId }) }
         val canIdentify = round.samples.groupBy { it.personId }.values.any(::ready)
         // 导入音频转写后就删除；即使还没有注册声纹，也先缓存特征供日后从原话补样本。
-        val pending = (selected ?: dao.pending()).filter { (it.separateSpeakers != false || (it.importChannel != null && it.speakerCount != 0)) && (canIdentify || it.sourceId == "import") }
+        val pending = (selected ?: dao.pending()).filter { it.logId != STUDIO_HOSTED_LOG_ID &&
+            (it.separateSpeakers != false || (it.importChannel != null && it.speakerCount != 0)) && (canIdentify || it.sourceId == "import") }
         if (pending.isEmpty()) return false
         var retry = false
         var lastError: String? = null

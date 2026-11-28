@@ -89,15 +89,18 @@ class Hotword066Test {
         val server = MockWebServer()
         server.enqueue(MockResponse().setBody("{\"text\":\"承改\"}")); server.start()
         val audio = File(context.cacheDir, "cloud066.wav").apply { writeBytes(byteArrayOf(1)) }
+        val pcm = File.createTempFile("cloud066-", ".pcm", context.cacheDir).apply {
+            writeBytes(ByteArray(64000) { if (it % 2 == 0) 0x10 else 0x27 })
+        }
         try {
             val settings = AndroidTranscribeSettings(context)
             settings.saveCustom(server.url("/v1/audio/transcriptions").toString(), "test")
             settings.setSource(TranscribeSource.Custom)
             val output = ConfiguredAsrProvider(context, settings) { listOf("城改") }
-                .recognize(AsrAudio(audio, "wav", 100), "") {}
+                .recognize(AsrAudio(audio, "wav", 2000, separateSpeakers = false, pcmFile = pcm), "") {}
             assertEquals("承改", output.sentences.single().text)
             assertNull(output.sentences.single().originalText)
-        } finally { server.shutdown(); audio.delete() }
+        } finally { server.shutdown(); audio.delete(); pcm.delete() }
     }
     @Test fun version21MigrationPreserves065DataAndOriginalDefaultsToNull() = runBlocking {
         val name = "migration066.db"; context.deleteDatabase(name)

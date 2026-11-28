@@ -26,6 +26,7 @@ object FootprintReports {
     /**
      * 纯函数，便于测试。to 是统计截止（今天传“现在”，往日传次日零点）。
      * place 按停留坐标取地名（手动名优先），取不到为 null 时只写坐标。
+     * ongoing：今天统计里最后一段停留，且最近 GAP_MS 内仍有定位、最新一点没走出停留半径；往日一律 false。
      */
     fun render(date: LocalDate, zone: ZoneId, points: List<LocationPoint>, to: Long,
                isHome: (Double, Double) -> Boolean, place: (Double, Double) -> Place?): FootprintReport? {
@@ -36,6 +37,11 @@ object FootprintReports {
         fun clock(at: Long) = Instant.ofEpochMilli(at).atZone(zone).format(hm)
         val weekday = date.format(DateTimeFormatter.ofPattern("M月d日 EEE", Locale.CHINA))
         val title = "今日足迹 · $weekday"
+        val last = track.points.last()
+        val open = track.stays.lastOrNull()?.takeIf { s ->
+            to < date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() && to - s.end <= Timeline.GAP_MS &&
+                to - last.at <= Timeline.GAP_MS && Track.meters(s.lat, s.lng, last.lat, last.lng) <= Track.STAY_RADIUS_M
+        }
         val stays = track.stays.map { s ->
             val g = tl.groupOf(s)
             val p = place(s.lat, s.lng)
@@ -71,7 +77,7 @@ object FootprintReports {
             .put("stays", JSONArray(stays.map { (s, name, p) ->
                 JSONObject().put("start", Instant.ofEpochMilli(s.start).toString()).put("end", Instant.ofEpochMilli(s.end).toString())
                     .put("minutes", (s.end - s.start) / 60_000).put("name", name).put("address", p?.address ?: JSONObject.NULL)
-                    .put("placeSource", p?.source ?: JSONObject.NULL).put("home", tl.groupOf(s)?.home == true)
+                    .put("placeSource", p?.source ?: JSONObject.NULL).put("home", tl.groupOf(s)?.home == true).put("ongoing", s === open)
                     .put("lat", s.lat).put("lng", s.lng).put("accuracyMeters", s.accuracy.toInt())
             }))
             .put("spans", JSONArray(tl.spans.map { sp ->

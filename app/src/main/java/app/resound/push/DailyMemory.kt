@@ -24,7 +24,7 @@ import java.time.ZoneId
 
 /** 对外 JSON 与内部数据读取分离，字段名和空值在此集中定义。时间均为 Unix 毫秒。 */
 internal suspend fun dailyMemoryJson(date: LocalDate, generatedAt: Long, markdown: String, review: DailyReview?, input: ReviewInput,
-    cards: List<SkillCard>, lines: List<TranscriptLineEntity>?, lineContext: Boolean = true): JSONObject {
+    cards: List<SkillCard>, lines: List<TranscriptLineEntity>?, lineContext: Boolean = true, excluded: Set<Pair<Long, String>> = emptySet()): JSONObject {
     val data = JSONObject()
         .put("review", review?.let { JSONObject().put("brief", it.brief).put("sections", it.pushJson().getJSONArray("sections")) } ?: JSONObject.NULL)
         .put("events", JSONArray(input.events.mapNotNull { e -> localRecord("event", e.id) { JSONObject().put("id", e.id).put("start", e.startAt).put("end", e.endAt)
@@ -36,7 +36,7 @@ internal suspend fun dailyMemoryJson(date: LocalDate, generatedAt: Long, markdow
         .put("cards", JSONArray(cards.map { c -> JSONObject().put("skill", c.skillName).put("title", c.title).put("summary", c.summary)
             .put("at", c.at).put("values", SkillJson.values(c.values)) }))
         .apply { if (lines != null) put("lines", JSONArray(lines.map { l -> JSONObject().put("id", l.id).put("at", l.startAt)
-            .put("speaker", l.speakerName ?: l.speakerTag ?: "某人").put("text", l.text).apply { VoiceInputMetadata.read(l.voiceInputJson)?.let { put("voice_input",
+            .put("speaker", l.speakerName ?: l.speakerTag ?: "某人").putSpeaker(l, excluded).put("text", l.text).apply { VoiceInputMetadata.read(l.voiceInputJson)?.let { put("voice_input",
                 VoiceInputMetadata.json(it, lineContext)) } } })) }
     fun element(key: String) = SharedJson.parseToJsonElement(data.get(key).toString())
     return JSONObject(PushBodyRules.dailyMemory(date.toString(), generatedAt, markdown, element("review"),
@@ -93,7 +93,8 @@ internal class DailyMemorySource(context: Context, memory: MemoryRepository, pri
         val markdown = if (body.isBlank()) body else "本文时间为 ${app.resound.platform.HistoricalZones.history().caption(target.toKotlinLocalDate())}\n\n$body"
         if (markdown.isBlank()) return null
         val at = System.currentTimeMillis()
-        val json = dailyMemoryJson(target, at, markdown, review, source, cards, lines, lineContext)
+        val excluded = if (withLines) dao.voiceprintExclusions().mapTo(mutableSetOf()) { it.segmentId to it.groupKey } else emptySet()
+        val json = dailyMemoryJson(target, at, markdown, review, source, cards, lines, lineContext, excluded)
         return PushMessage("每日记忆文档 · $target", review?.pushBody(PushFormat.Text) ?: "$target 的记忆文档", PushTopic.DailyMemory,
             "resound://review?open=review&date=$target", at, memory = json)
     }

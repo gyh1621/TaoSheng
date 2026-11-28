@@ -1,6 +1,7 @@
 package app.resound.redo
 
 import app.resound.context.SituationLookup
+import app.resound.envsound.LocalEnvSoundRepository
 import app.resound.update.UpdateDiagnostics
 
 import android.content.Context
@@ -13,7 +14,6 @@ import app.resound.skills.*
 import app.resound.usage.UsagePurpose
 import kotlinx.coroutines.*
 import org.json.JSONArray
-import java.io.File
 import java.time.LocalDate
 
 internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: AndroidAsrChooser,
@@ -22,8 +22,11 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
     identify: suspend (List<Long>) -> Unit,
     network: (TranscribeSource) -> Boolean,
     situation: SituationLookup? = null,
+    envSound: LocalEnvSoundRepository? = null,
+    studioSync: StudioSyncQueue,
 ): RedoEngine {
-    val provider = ConfiguredAsrProvider(context, settings, hotwords)
+    val provider = ConfiguredAsrProvider(context, settings, { envSound?.settings?.value ?: app.resound.envsound.EnvSoundSettings() },
+        { envSound?.isRestoredOrWrong(it) == true }, hotwords)
     val whole = WholeTranscribeRunner(db.wholeTranscripts(), db.transcribe(), CustomAsrProvider(settings, hotwords),
         { settings.credential(TranscribeSource.Custom) }, { settings.ready(TranscribeSource.Custom) && network(TranscribeSource.Custom) }, settings::identity)
     val files = SkillFiles(context)
@@ -36,7 +39,7 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
         var sent = 0L; var error: AsrError? = null; var outcome = "Failed"; var log: String? = null
         val distinguish = segment.separateSpeakers != false && !db.topics().trainingAt(segment.startAt)
         try {
-            val result = provider.recognize(source, AsrAudio(File(segment.path), File(segment.path).extension, segment.endAt - segment.startAt, separateSpeakers = distinguish, speakerCount = segment.speakerCount), key) {
+            val result = provider.recognize(source, segment.asrAudio(distinguish, redo = true), key) {
                 if (source != TranscribeSource.Local) {
                     sent = segment.endAt - segment.startAt
                     db.transcribe().reserveAudio(LocalDate.now().toString(), sent, segment.id)
@@ -46,7 +49,7 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
             outcome = if (result.sentences.isEmpty()) "Empty" else "Done"
             log = TranscribePolicy.safeLogId(result.logId, key)
             chooser.record(source, segment.endAt - segment.startAt, System.currentTimeMillis() - began)
-            result.copy(sentences = result.sentences.map { line ->
+            if (result.studioHosted) result else result.copy(sentences = result.sentences.map { line ->
                 line.copy(speakerTag = segment.importChannel?.takeIf { !distinguish && segment.speakerCount != 0 }?.let { "channel:$it" } ?: line.speakerTag.takeIf { distinguish })
             })
         } catch (e: CancellationException) { error = AsrError.Interrupted; throw e }
@@ -56,7 +59,7 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
             timing.outcome = outcome; PipelineTimes.recordSegment(context, timing.line()) } }
         }
     }, afterTranscribe = { segment, source ->
-        if (source == TranscribeSource.Custom) {
+        if (source == TranscribeSource.Custom && db.transcribe().findSegment(segment.id)?.logId != STUDIO_HOSTED_LOG_ID) {
             db.wholeTranscripts().enqueue(segment.id, System.currentTimeMillis(), replace = true)
             whole.runPending()
         } else db.wholeTranscripts().invalidate(segment.id)
@@ -139,5 +142,8 @@ internal fun createRedoEngine(context: Context, db: CaptureDatabase, chooser: An
                 "重做技能 ${skill.id}：门槛复核丢弃 ${rows.size - accepted.size} 张")
             accepted.take(skill.maxCardsPerDay)
         }
-    }, pauseMillis = { digestSettings.pauseMinutes.value * 60_000L })
+    }, pauseMillis = { digestSettings.pauseMinutes.value * 60_000L },
+        recordStudioDecision = { segment, sound, elapsed -> envSound?.recordStudioDecision(segment, sound, elapsed) },
+        onStudioUnsyncedSegment = studioSync::segmentSync,
+        isStudioOffline = { it == TranscribeSource.Custom && provider.hasStudio() })
 }

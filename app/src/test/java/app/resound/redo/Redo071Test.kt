@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Context
 import androidx.room.Room
 import app.resound.data.*
+import app.resound.envsound.EnvSoundRow
 import app.resound.transcribe.*
 import app.resound.digest.*
 import app.resound.importer.*
@@ -119,6 +120,127 @@ class Redo071Test {
         assertTrue(e.undo("one").isSuccess)
         assertEquals("旧原话", db.transcribe().exportSegments(listOf(1)).single().lines.single().text)
         assertEquals("旧整体原话", whole.get(1)!!.text)
+    }
+
+    @Test fun manualRedoPreservesIdentityOnlyForExactOrSubstantiallyOverlappingLines() = runBlocking {
+        seed()
+        val segment = db.transcribe().segment(1)
+        db.transcribe().deleteLines(1)
+        val old = TranscriptLineEntity(1, 1, 1000, 1400, "旧原话", "manual", eventId = 1, digestedAt = 1,
+            speakerName = "Manual", speakerPersonId = 9, speakerScore = .96f, speakerManual = true)
+        db.transcribe().insertLines(listOf(old, old.copy(id = 2, startAt = 1500, endAt = 1900),
+            old.copy(id = 3, startAt = 2000, endAt = 2400)))
+        val fresh = listOf(AsrSentence(0, 400, "exact", "studio", speakerPersonId = 42),
+            AsrSentence(700, 1100, "overlap", "studio", speakerPersonId = 42),
+            AsrSentence(1300, 1700, "small overlap", "studio", speakerPersonId = 42))
+        val redo = RedoEngine(db, chooser, recognize = { _, _ -> AsrResult(fresh, 2000, null, studioHosted = true) },
+            digest = { _, _ -> error("unexpected") }, now = { 100 })
+        run(redo, request = RedoRequest(segmentIds = listOf(segment.id), scope = RedoScope.TranscribeOnly))
+        val saved = db.transcribe().linesForRedo(segment.id).sortedBy { it.startAt }
+        assertEquals(listOf(1L, 2L, 3L), saved.map { it.id })
+        assertTrue(saved.all { it.eventId == 1L && it.digestedAt == 1L })
+        for (line in saved.take(2)) {
+            assertTrue(line.speakerManual)
+            assertEquals("Manual", line.speakerName)
+            assertEquals(9L, line.speakerPersonId)
+            assertEquals(.96f, line.speakerScore!!, .001f)
+        }
+        assertFalse(saved.last().speakerManual)
+        assertEquals(42L, saved.last().speakerPersonId)
+    }
+
+    @Test fun prependedDisjointRedoLineDoesNotTakeExactManualLineIdentity() = runBlocking {
+        seed()
+        db.transcribe().deleteLines(1)
+        db.transcribe().insertLines(listOf(TranscriptLineEntity(71, 1, 1200, 2000, "old", "manual",
+            eventId = 1, digestedAt = 1, speakerName = "Chosen", speakerPersonId = 9, speakerManual = true)))
+        val fresh = listOf(AsrSentence(0, 100, "inserted", null), AsrSentence(200, 1000, "retained", null))
+        val redo = RedoEngine(db, chooser, recognize = { _, _ -> AsrResult(fresh, 2000, null) },
+            digest = { _, _ -> error("unexpected") }, now = { 100 })
+        run(redo, request = RedoRequest(segmentIds = listOf(1), scope = RedoScope.TranscribeOnly))
+        val (inserted, retained) = db.transcribe().linesForRedo(1)
+        assertTrue(inserted.id > 0 && inserted.id != 71L)
+        assertFalse(inserted.speakerManual)
+        assertEquals(71L, retained.id)
+        assertEquals("Chosen", retained.speakerName)
+        assertEquals(9L, retained.speakerPersonId)
+        assertTrue(retained.speakerManual)
+    }
+
+    @Test fun successfulStudioAndNonStudioRedoClearDeferredSync() = runBlocking {
+        seed(); seed(id = 2)
+        val cleared = mutableListOf<Pair<Long, String?>>()
+        val redo = RedoEngine(db, chooser, recognize = { segment, _ ->
+            AsrResult(listOf(AsrSentence(0, 2000, "new", null)), 2000, null, studioHosted = segment.id == 1L)
+        }, digest = { _, _ -> error("unexpected") }, now = { 100 },
+            onStudioUnsyncedSegment = { segment, payload -> cleared.add(segment.id to payload); Unit })
+        run(redo, request = RedoRequest(segmentIds = listOf(1, 2), scope = RedoScope.TranscribeOnly))
+        assertEquals(listOf(1L to null, 2L to null), cleared)
+    }
+
+    @Test fun undoRestoresExistingEnvironmentDecisionAndRemovesNewOne() = runBlocking {
+        seed(); seed(id = 2)
+        fun sound(segment: SegmentEntity, verdict: String) = EnvSoundRow(segment.id, segment.startAt, segment.endAt,
+            segment.path, verdict, null, "", "", "{}", skipped = false, markMedia = verdict == "Media")
+        val old = sound(db.transcribe().segment(1), "Media")
+        db.envSound().insert(old)
+        val redo = RedoEngine(db, chooser, recognize = { _, _ -> AsrResult(listOf(AsrSentence(0, 2000, "新原话", null)),
+            2000, null, studioHosted = true, studioEnvSound = StudioEnvSound("Keep", null, false, false, emptyList(), emptyList(), emptyMap())) },
+            digest = { _, _ -> error("unexpected") }, now = { 100 },
+            recordStudioDecision = { segment, decision, _ -> db.envSound().saveStudio(sound(segment, decision.verdict)) })
+        run(redo, request = RedoRequest(segmentIds = listOf(1, 2), scope = RedoScope.TranscribeOnly))
+        assertEquals("Keep", db.envSound().get(1)?.verdict)
+        assertEquals("Keep", db.envSound().get(2)?.verdict)
+        assertTrue(redo.undo("one").isSuccess)
+        assertEquals(old, db.envSound().get(1))
+        assertNull(db.envSound().get(2))
+    }
+
+    @Test fun studioRedoDefersDownstreamSyncAndFailsRetryablyWithoutQueue() = runBlocking {
+        seed(); seed(id = 2)
+        val result = AsrResult(listOf(AsrSentence(0, 2000, "新原话", null)), 2000, null,
+            studioHosted = true, studioWebhookSynced = false, studioSyncPayload = """{"segment_id":1}""")
+        fun engine(enqueue: (suspend (SegmentEntity, String?) -> Unit)? = null) = RedoEngine(db, chooser,
+            recognize = { _, _ -> result }, digest = { _, _ -> error("unexpected") }, now = { 100 }, onStudioUnsyncedSegment = enqueue)
+        val queued = mutableListOf<Pair<Long, String?>>()
+        run(engine { segment, payload -> queued.add(segment.id to payload); Unit },
+            request = RedoRequest(segmentIds = listOf(1), scope = RedoScope.TranscribeOnly))
+        assertEquals(listOf(1L to result.studioSyncPayload), queued)
+        assertEquals("Done", db.transcribe().segment(1).status)
+        assertEquals("新原话", db.transcribe().linesForRedo(1).single().text)
+        val failure = runCatching {
+            run(engine(), "no-queue", RedoRequest(segmentIds = listOf(2), scope = RedoScope.TranscribeOnly))
+        }.exceptionOrNull() as? AsrException
+        assertEquals(AsrError.Server, failure?.type)
+        val retry = db.transcribe().segment(2)
+        assertEquals("Failed", retry.status)
+        assertTrue(retry.redoPending)
+        assertNotNull(retry.nextRetryAt)
+        assertEquals("旧原话", db.transcribe().linesForRedo(2).single().text)
+    }
+
+    @Test fun offlineStudioRedoDoesNotConsumeRetryAttempts() = runBlocking {
+        seed(); seed(id = 2)
+        db.transcribe().update(db.transcribe().segment(1).copy(attempts = 4, firstFailedAt = 20))
+        for (id in listOf(1L, 2L)) {
+            val redo = RedoEngine(db, chooser, recognize = { _, _ -> throw AsrException(AsrError.Network) },
+                digest = { _, _ -> error("unexpected") }, now = { 100 }, isStudioOffline = { id == 1L && it == TranscribeSource.Custom })
+            val failure = runCatching {
+                run(redo, "offline-" + id, RedoRequest(segmentIds = listOf(id), scope = RedoScope.TranscribeOnly, asr = TranscribeSource.Custom))
+            }.exceptionOrNull() as? AsrException
+            assertEquals(AsrError.Network, failure?.type)
+        }
+        val studio = db.transcribe().segment(1)
+        assertEquals("Pending", studio.status)
+        assertEquals(4, studio.attempts)
+        assertEquals(20L, studio.firstFailedAt)
+        assertNull(studio.nextRetryAt)
+        assertTrue(studio.redoPending)
+        assertEquals("Custom", studio.asrSource)
+        val custom = db.transcribe().segment(2)
+        assertEquals("Failed", custom.status)
+        assertEquals(0, custom.attempts)
+        assertNotNull(custom.nextRetryAt)
     }
 
     /** 卡 211：人工改过的句子，重新转写前计数提醒；重转后回到机器识别的结果 */

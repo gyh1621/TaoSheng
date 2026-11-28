@@ -1,7 +1,9 @@
 package app.resound.push
 
+import app.resound.data.TranscriptLineEntity
 import app.resound.platform.SharedJson
 import app.resound.transcribe.VoiceInputMetadata
+import app.resound.voiceprint.VoiceprintAudio
 
 import okhttp3.*
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -22,6 +24,21 @@ internal fun canonical(value: Any?): String = when (value) {
     is String -> JSONObject.quote(value)
     else -> value.toString()
 }
+
+/**
+ * 原话行的说话人置信度与手标，字段与 :8012 SCHEMA 对齐；两处都显式写出 null：
+ * 撤销手标或重新自动识别后对端据此清掉旧值。置信度取 float 的十进制写法，避免 0.8299999833 这类尾数。
+ * 手标但没有身份的行只有在 voiceprint_exclusions 里才是 not_me；“标成未知”同样清空身份却不排除，写 null。
+ */
+internal fun JSONObject.putSpeaker(l: TranscriptLineEntity, excluded: Set<Pair<Long, String>> = emptySet()): JSONObject = put("speakerScore",
+    l.speakerScore?.takeIf { it.isFinite() && it in 0f..1f }?.toString()?.toDouble() ?: JSONObject.NULL)
+    .put("speakerManual", when {
+        !l.speakerManual -> JSONObject.NULL
+        l.speakerPersonId == 0L || l.speakerName == "我" -> "me"
+        !l.speakerName.isNullOrBlank() -> l.speakerName
+        (l.segmentId to VoiceprintAudio.groupKey(l)) in excluded -> "not_me"
+        else -> JSONObject.NULL
+    })
 
 /** 保存本通道的指纹与已发布模板；模板用于摘要即时刷新时保留尚未触发更新的记录。绝不存凭据。 */
 internal class PushSyncState(private val file: File) {
@@ -166,7 +183,7 @@ internal object RecordDelta {
         data.reviews.forEach { r -> put("review:${r.id}", JSONObject().put("id", r.id).put("type", r.type).put("startDate", r.startDate).put("endDate", r.endDate)
             .put("brief", r.brief).put("sections", JSONArray(r.sectionsJson))) }
         data.lines.forEach { l -> put("line:${l.id}", JSONObject().put("id", l.id).put("at", l.startAt).put("end", l.endAt)
-            .put("eventId", l.eventId ?: JSONObject.NULL).put("speaker", l.speakerName ?: l.speakerTag ?: "某人").put("text", l.text).apply { VoiceInputMetadata.read(l
+            .put("eventId", l.eventId ?: JSONObject.NULL).put("speaker", l.speakerName ?: l.speakerTag ?: "某人").putSpeaker(l, data.voiceprintExclusions).put("text", l.text).apply { VoiceInputMetadata.read(l
                 .voiceInputJson)?.let { put("voice_input", VoiceInputMetadata.json(it, s.lineContext)) } }) }
     }
     fun changes(current: Map<String, JSONObject>, old: JSONObject): JSONObject = JSONObject(RecordDeltaRules.changes(
